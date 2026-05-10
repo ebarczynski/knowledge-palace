@@ -1,0 +1,44 @@
+# Knowledge Palace Configuration
+
+[database]
+host = "localhost"
+port = 5432
+name = "knowledge_palace"
+user = "kp"
+password = "kp"
+
+[calibre]
+# Path to your Calibre Library folder (the one containing metadata.db)
+library_path = ""
+
+[sources]
+paths = [
+    "~/notes",
+    # "~/projects/*/docs",
+    # "/mnt/c/Users/barcz/Documents",
+]
+file_extensions = [".md", ".txt", ".org", ".rst"]
+
+[embedding]
+model = "nomic-ai/nomic-embed-text-v1.5"
+provider = "sentence-transformers"
+batch_size = 32
+dimensions = 768
+# Use "cuda" for NVIDIA GPU, "mps" for Apple Silicon, "cpu" otherwise
+device = "cpu"
+
+[chunking]
+strategy = "semantic"
+max_tokens = 512
+overlap_tokens = 50
+respect_headings = true
+
+[search]
+default_mode = "hybrid"
+hybrid_weight_vector = 0.7
+hybrid_weight_fts = 0.3
+default_limit = 10
+
+[api]
+host = "0.0.0.0"
+port = 8080
