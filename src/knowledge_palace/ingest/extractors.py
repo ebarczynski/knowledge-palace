@@ -189,9 +189,61 @@ class PdfExtractor(Extractor):
         )
 
 
+class MobiExtractor(Extractor):
+    """Handles .mobi files via the mobi package."""
+
+    def can_handle(self, path: Path) -> bool:
+        return path.suffix.lower() in {".mobi", ".azw", ".azw3"}
+
+    def extract(self, path: Path, metadata: dict | None = None) -> ExtractedDocument:
+        import mobi
+        from bs4 import BeautifulSoup
+        import tempfile
+
+        raw_metadata = metadata or {}
+
+        # mobi.unpack() extracts to a temp directory and returns (filepath, extracted_dir)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, extracted_dir = mobi.unpack(str(path), tmpdir)
+
+            # Find all HTML files in the extracted directory
+            extracted_path = Path(extracted_dir)
+            html_files = sorted(extracted_path.rglob("*.html")) + sorted(extracted_path.rglob("*.htm"))
+
+            parts: list[str] = []
+            for html_file in html_files:
+                try:
+                    html_content = html_file.read_text(encoding="utf-8", errors="replace")
+                    soup = BeautifulSoup(html_content, "html.parser")
+                    text = soup.get_text(separator="\n", strip=True)
+                    if text.strip():
+                        parts.append(text)
+                except Exception:
+                    continue
+
+        content = "\n\n".join(parts)
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+
+        title = raw_metadata.get("title") or path.stem
+        author = raw_metadata.get("author")
+
+        return ExtractedDocument(
+            title=title,
+            author=author,
+            content=content,
+            file_path=str(path),
+            content_hash=content_hash,
+            metadata={
+                **raw_metadata,
+                "format": "mobi",
+            },
+            source=raw_metadata.get("source", "calibre"),
+        )
+
+
 def get_extractors() -> list[Extractor]:
     """Return all available extractors in priority order."""
-    return [EpubExtractor(), PdfExtractor(), TextExtractor()]
+    return [EpubExtractor(), MobiExtractor(), PdfExtractor(), TextExtractor()]
 
 
 def extract_file(path: Path, metadata: dict | None = None) -> ExtractedDocument:

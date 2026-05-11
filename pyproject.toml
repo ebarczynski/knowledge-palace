@@ -18,6 +18,7 @@ dependencies = [
     "einops>=0.8",
     # Document extraction
     "ebooklib>=0.18",
+    "mobi>=0.3",
     "pymupdf>=1.25",
     # Text processing
     "tiktoken>=0.9",
