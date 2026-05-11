@@ -88,49 +88,33 @@ class IngestionPipeline:
     # ------------------------------------------------------------------
 
     def _extract_batch(self, books, bridge, reindex: bool) -> list:
-        """Synchronous: extract and chunk a batch of books. Returns (doc, chunks) list."""
-        from sqlalchemy import select
-        import asyncio
-
+        """Synchronous: extract and chunk a batch of books. Returns (doc, chunks) list.
+        
+        Note: dedup check is NOT done here (this runs in a thread, and asyncpg
+        connections are bound to the main event loop). Dedup happens in
+        _embed_and_commit_batch inside the same session as the insert.
+        """
         batch_data = []
-        loop = asyncio.new_event_loop()
-        try:
-            for book in books:
-                try:
-                    doc = bridge.extract_book(book)
-                    if doc is None:
-                        continue
+        for book in books:
+            try:
+                doc = bridge.extract_book(book)
+                if doc is None:
+                    continue
 
-                    # Dedup check
-                    if not reindex:
-                        async def _check_dup(content_hash):
-                            async with session_context() as check_session:
-                                exists = await check_session.execute(
-                                    select(Document).where(
-                                        Document.content_hash == content_hash
-                                    )
-                                )
-                                return exists.scalar_one_or_none() is not None
+                chunks = chunk_text(
+                    doc.content,
+                    strategy=self.config.chunking.strategy,
+                    max_tokens=self.config.chunking.max_tokens,
+                    overlap_tokens=self.config.chunking.overlap_tokens,
+                    respect_headings=self.config.chunking.respect_headings,
+                )
 
-                        if loop.run_until_complete(_check_dup(doc.content_hash)):
-                            continue
+                if chunks:
+                    doc.content = ""  # free large text
+                    batch_data.append((doc, chunks))
 
-                    chunks = chunk_text(
-                        doc.content,
-                        strategy=self.config.chunking.strategy,
-                        max_tokens=self.config.chunking.max_tokens,
-                        overlap_tokens=self.config.chunking.overlap_tokens,
-                        respect_headings=self.config.chunking.respect_headings,
-                    )
-
-                    if chunks:
-                        doc.content = ""  # free large text
-                        batch_data.append((doc, chunks))
-
-                except Exception as e:
-                    logger.exception("Failed to extract %s", book.get("title", "?"))
-        finally:
-            loop.close()
+            except Exception as e:
+                logger.exception("Failed to extract %s", book.get("title", "?"))
         return batch_data
 
     async def _embed_and_commit_batch(
