@@ -14,6 +14,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0",
     # Embeddings & ML
     "sentence-transformers>=4.0",
+    "onnxruntime>=1.18",
     "torch>=2.5",
     "einops>=0.8",
     # Document extraction
