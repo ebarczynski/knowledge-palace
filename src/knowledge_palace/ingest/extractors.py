@@ -12,6 +12,13 @@ from rich.console import Console
 console = Console()
 
 
+def _sanitize_text(text: str | None) -> str | None:
+    """Remove null bytes and other characters invalid in PostgreSQL TEXT columns."""
+    if text is None:
+        return None
+    return text.replace("\x00", "")
+
+
 @dataclass
 class ExtractedDocument:
     """Result of extracting text from a file."""
@@ -22,6 +29,12 @@ class ExtractedDocument:
     content_hash: str
     metadata: dict
     source: str  # "calibre" | "file"
+
+    def __post_init__(self):
+        # PDF/EPUB extraction can produce null bytes which PostgreSQL rejects
+        self.title = _sanitize_text(self.title) or ""
+        self.author = _sanitize_text(self.author)
+        self.content = _sanitize_text(self.content) or ""
 
 
 class Extractor(ABC):

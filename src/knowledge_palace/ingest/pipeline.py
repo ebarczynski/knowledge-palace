@@ -190,6 +190,11 @@ class IngestionPipeline:
                                 emb_offset += len(chunks)
                                 continue
 
+                            # Sanitize metadata fields for PostgreSQL (null bytes)
+                            desc = doc.metadata.get("description")
+                            if desc:
+                                desc = desc.replace("\x00", "")
+
                             db_doc = Document(
                                 title=doc.title,
                                 author=doc.author,
@@ -197,7 +202,7 @@ class IngestionPipeline:
                                 file_path=doc.file_path,
                                 calibre_id=doc.metadata.get("calibre_id"),
                                 content_hash=doc.content_hash,
-                                description=doc.metadata.get("description"),
+                                description=desc,
                                 tags=doc.metadata.get("tags", []),
                                 metadata_=doc.metadata,
                             )
@@ -207,7 +212,7 @@ class IngestionPipeline:
                             for j, chunk in enumerate(chunks):
                                 db_chunk = Chunk(
                                     document_id=db_doc.id,
-                                    content=chunk.content,
+                                    content=chunk.content.replace("\x00", ""),
                                     chunk_index=chunk.index,
                                     embedding=doc_embeddings[j],
                                     token_count=chunk.token_count,
