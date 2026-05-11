@@ -177,9 +177,19 @@ class IngestionPipeline:
                 for doc, chunks in batch_data:
                     try:
                         doc_embeddings = all_embeddings[emb_offset:emb_offset + len(chunks)]
-                        emb_offset += len(chunks)
 
                         async with session_context() as session:
+                            # Check inside the same session to avoid race condition
+                            # when same book exists in multiple formats (e.g. EPUB + PDF)
+                            existing = await session.execute(
+                                select(Document).where(
+                                    Document.content_hash == doc.content_hash
+                                )
+                            )
+                            if existing.scalar_one_or_none():
+                                emb_offset += len(chunks)
+                                continue
+
                             db_doc = Document(
                                 title=doc.title,
                                 author=doc.author,
@@ -207,6 +217,7 @@ class IngestionPipeline:
 
                             await session.commit()
 
+                        emb_offset += len(chunks)
                         results["extracted"] += 1
                         results["chunked"] += len(chunks)
                         results["embedded"] += sum(
@@ -215,6 +226,7 @@ class IngestionPipeline:
                         total_processed += 1
 
                     except Exception as e:
+                        emb_offset += len(chunks)
                         results["errors"] += 1
                         logger.exception("Failed to commit %s", doc.title)
 
@@ -322,9 +334,18 @@ class IngestionPipeline:
                     for doc, chunks in batch_data:
                         try:
                             doc_embeddings = all_embeddings[emb_offset:emb_offset + len(chunks)]
-                            emb_offset += len(chunks)
 
                             async with session_context() as session:
+                                # Check inside the same session to avoid race condition
+                                existing = await session.execute(
+                                    select(Document).where(
+                                        Document.content_hash == doc.content_hash
+                                    )
+                                )
+                                if existing.scalar_one_or_none():
+                                    emb_offset += len(chunks)
+                                    continue
+
                                 db_doc = Document(
                                     title=doc.title,
                                     author=doc.author,
@@ -350,6 +371,7 @@ class IngestionPipeline:
 
                                 await session.commit()
 
+                            emb_offset += len(chunks)
                             results["extracted"] += 1
                             results["chunked"] += len(chunks)
                             results["embedded"] += sum(
@@ -357,6 +379,7 @@ class IngestionPipeline:
                             )
 
                         except Exception as e:
+                            emb_offset += len(chunks)
                             results["errors"] += 1
 
                     del batch_data, all_texts, all_embeddings
