@@ -190,7 +190,7 @@ class PdfExtractor(Extractor):
 
 
 class MobiExtractor(Extractor):
-    """Handles .mobi files via the mobi package."""
+    """Handles .mobi files via the mobi package (converts to EPUB/HTML)."""
 
     def can_handle(self, path: Path) -> bool:
         return path.suffix.lower() in {".mobi", ".azw", ".azw3"}
@@ -198,30 +198,32 @@ class MobiExtractor(Extractor):
     def extract(self, path: Path, metadata: dict | None = None) -> ExtractedDocument:
         import mobi
         from bs4 import BeautifulSoup
-        import tempfile
 
         raw_metadata = metadata or {}
 
-        # mobi.unpack() extracts to a temp directory and returns (filepath, extracted_dir)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _, extracted_dir = mobi.unpack(str(path), tmpdir)
+        # mobi.extract() converts to EPUB or HTML, returns (tempdir, filepath)
+        tempdir, extracted_file = mobi.extract(str(path))
+        extracted_path = Path(extracted_file)
 
-            # Find all HTML files in the extracted directory
-            extracted_path = Path(extracted_dir)
-            html_files = sorted(extracted_path.rglob("*.html")) + sorted(extracted_path.rglob("*.htm"))
+        try:
+            if extracted_path.suffix.lower() == ".epub":
+                # Reuse EPUB extractor on the converted file
+                epub_extractor = EpubExtractor()
+                result = epub_extractor.extract(extracted_path, metadata)
+                # Override file_path and format to reflect original MOBI
+                result.file_path = str(path)
+                result.metadata["format"] = "mobi"
+                return result
 
-            parts: list[str] = []
-            for html_file in html_files:
-                try:
-                    html_content = html_file.read_text(encoding="utf-8", errors="replace")
-                    soup = BeautifulSoup(html_content, "html.parser")
-                    text = soup.get_text(separator="\n", strip=True)
-                    if text.strip():
-                        parts.append(text)
-                except Exception:
-                    continue
+            # Fallback: parse HTML directly
+            html_content = extracted_path.read_text(encoding="utf-8", errors="replace")
+            soup = BeautifulSoup(html_content, "html.parser")
+            content = soup.get_text(separator="\n", strip=True)
+        finally:
+            # Clean up temp directory
+            import shutil
+            shutil.rmtree(tempdir, ignore_errors=True)
 
-        content = "\n\n".join(parts)
         content_hash = hashlib.sha256(content.encode()).hexdigest()
 
         title = raw_metadata.get("title") or path.stem
