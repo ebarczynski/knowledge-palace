@@ -17,6 +17,10 @@ dependencies = [
     "onnxruntime>=1.18",
     "torch>=2.5",
     "einops>=0.8",
+    "numpy>=2.0",
+    "transformers>=4.45",
+    "safetensors>=0.5",
+    "huggingface-hub>=0.30",
     # Document extraction
     "ebooklib>=0.18",
     "mobi>=0.3",
@@ -33,6 +37,13 @@ dependencies = [
     # MCP server
     "mcp>=1.6",
     "pgvector>=0.4.2",
+]
+
+[project.optional-dependencies]
+mlx = [
+    "mlx>=0.25",
+    "mlx-embeddings>=0.1",
+    "mlx-lm>=0.30",
 ]
 
 [project.scripts]
