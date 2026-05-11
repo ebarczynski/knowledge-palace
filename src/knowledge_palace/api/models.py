@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from pydantic import BaseModel
 
 
@@ -10,8 +12,8 @@ class HealthResponse(BaseModel):
 
 
 class SearchResultItem(BaseModel):
-    chunk_id: str
-    document_id: str
+    chunk_id: UUID
+    document_id: UUID
     content: str
     score: float
     title: str
@@ -34,7 +36,7 @@ class SimilarResponse(BaseModel):
 
 
 class DocumentResponse(BaseModel):
-    id: str
+    id: UUID
     title: str
     author: str | None
     source: str
@@ -46,7 +48,7 @@ class DocumentResponse(BaseModel):
 
 
 class DocumentListItem(BaseModel):
-    id: str
+    id: UUID
     title: str
     author: str | None
     source: str
