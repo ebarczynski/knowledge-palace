@@ -9,20 +9,16 @@ password = "kp"
 
 [calibre]
 # Path to your Calibre Library folder (the one containing metadata.db)
-library_path = ""
+library_path = "/mnt/c/Users/barcz/Documents/Books_11052026_hp_export/Books"
 
 [sources]
-paths = [
-    "~/notes",
-    # "~/projects/*/docs",
-    # "/mnt/c/Users/barcz/Documents",
-]
+paths = []
 file_extensions = [".md", ".txt", ".org", ".rst"]
 
 [embedding]
 model = "nomic-ai/nomic-embed-text-v1.5"
 provider = "sentence-transformers"
-batch_size = 32
+batch_size = 64
 dimensions = 768
 # Use "cuda" for NVIDIA GPU, "mps" for Apple Silicon, "cpu" otherwise
 device = "cpu"

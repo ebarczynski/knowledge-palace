@@ -15,6 +15,7 @@ dependencies = [
     # Embeddings & ML
     "sentence-transformers>=4.0",
     "torch>=2.5",
+    "einops>=0.8",
     # Document extraction
     "ebooklib>=0.18",
     "pymupdf>=1.25",

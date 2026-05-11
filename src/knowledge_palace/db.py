@@ -106,19 +106,59 @@ async def init_db(database_url: str) -> None:
 
 
 async def get_session() -> AsyncSession:
-    """Get a database session."""
+    """Get a database session (async generator for FastAPI-style dependency injection)."""
     if _session_factory is None:
         raise RuntimeError("Database not initialized. Call init_db() first.")
     async with _session_factory() as session:
         yield session
 
 
+class _SessionContext:
+    """Synchronous context manager wrapping an async session for use with `async with`."""
+
+    def __init__(self):
+        if _session_factory is None:
+            raise RuntimeError("Database not initialized. Call init_db() first.")
+        self._session: AsyncSession | None = None
+
+    async def __aenter__(self) -> AsyncSession:
+        self._session = _session_factory()
+        await self._session.__aenter__()
+        return self._session
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self._session is not None:
+            return await self._session.__aexit__(exc_type, exc_val, exc_tb)
+
+
+def session_context():
+    """Return an async context manager that yields a single DB session.
+
+    Usage::
+
+        async with session_context() as session:
+            session.add(...)
+            await session.commit()
+    """
+    return _SessionContext()
+
+
 async def create_tables() -> None:
-    """Create all tables (use migrations in production)."""
+    """Create all tables (use migrations in production).
+
+    Handles the case where the pgvector extension or tables already exist
+    gracefully.  If the database user lacks CREATE EXTENSION permissions,
+    the extension is assumed to be pre-installed by a superuser.
+    """
     if _engine is None:
         raise RuntimeError("Database not initialized.")
     async with _engine.begin() as conn:
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        try:
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        except Exception:
+            # The user may not have superuser privileges to create extensions.
+            # In that case assume the extension is already available.
+            pass
         await conn.run_sync(Base.metadata.create_all)
 
 

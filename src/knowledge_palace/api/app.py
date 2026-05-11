@@ -16,6 +16,8 @@ from .models import (
     SearchResponse,
     SearchResultItem,
     DocumentResponse,
+    DocumentsResponse,
+    DocumentListItem,
     SimilarResponse,
     HealthResponse,
 )
@@ -135,6 +137,51 @@ def create_app(config: Config) -> FastAPI:
                 for r in results.results
             ],
         )
+
+    @app.get("/api/v1/documents", response_model=DocumentsResponse)
+    async def list_documents(
+        source: str | None = Query(None, description="Filter by source"),
+        author: str | None = Query(None, description="Filter by author"),
+        limit: int = Query(20, ge=1, le=200),
+        offset: int = Query(0, ge=0),
+    ):
+        from sqlalchemy import select, func as sa_func
+        from ..db import get_session
+
+        async for session in get_session():
+            query = select(Document).order_by(Document.created_at.desc())
+            count_query = select(sa_func.count()).select_from(Document)
+
+            if source is not None:
+                query = query.where(Document.source == source)
+                count_query = count_query.where(Document.source == source)
+            if author is not None:
+                query = query.where(Document.author == author)
+                count_query = count_query.where(Document.author == author)
+
+            total_result = await session.execute(count_query)
+            total = total_result.scalar_one()
+
+            query = query.offset(offset).limit(limit)
+            result = await session.execute(query)
+            docs = result.scalars().all()
+
+            return DocumentsResponse(
+                total=total,
+                offset=offset,
+                limit=limit,
+                documents=[
+                    DocumentListItem(
+                        id=doc.id,
+                        title=doc.title,
+                        author=doc.author,
+                        source=doc.source,
+                        tags=doc.tags or [],
+                        created_at=doc.created_at.isoformat(),
+                    )
+                    for doc in docs
+                ],
+            )
 
     @app.get("/api/v1/documents/{document_id}", response_model=DocumentResponse)
     async def get_document(document_id: str):

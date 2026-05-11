@@ -43,3 +43,19 @@ class DocumentResponse(BaseModel):
     tags: list[str]
     metadata: dict
     created_at: str
+
+
+class DocumentListItem(BaseModel):
+    id: str
+    title: str
+    author: str | None
+    source: str
+    tags: list[str]
+    created_at: str
+
+
+class DocumentsResponse(BaseModel):
+    total: int
+    offset: int
+    limit: int
+    documents: list[DocumentListItem]

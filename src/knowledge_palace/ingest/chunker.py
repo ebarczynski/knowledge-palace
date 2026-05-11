@@ -7,6 +7,19 @@ from dataclasses import dataclass
 
 import tiktoken
 
+# Module-level cache: avoid repeated tiktoken.get_encoding() calls which are
+# expensive when processing hundreds of books with thousands of chunks.
+_encoding_name: str = "cl100k_base"
+_encoding: tiktoken.Encoding | None = None
+
+
+def _get_encoding() -> tiktoken.Encoding:
+    """Return the cached tiktoken encoding, initialising on first call."""
+    global _encoding
+    if _encoding is None:
+        _encoding = tiktoken.get_encoding(_encoding_name)
+    return _encoding
+
 
 @dataclass
 class Chunk:
@@ -19,8 +32,8 @@ class Chunk:
 
 def count_tokens(text: str, model: str = "cl100k_base") -> int:
     """Count tokens using tiktoken."""
-    enc = tiktoken.get_encoding(model)
-    return len(enc.encode(text))
+    enc = _get_encoding() if model == _encoding_name else tiktoken.get_encoding(model)
+    return len(enc.encode(text, disallowed_special=()))
 
 
 def chunk_fixed(
@@ -29,8 +42,8 @@ def chunk_fixed(
     overlap_tokens: int = 50,
 ) -> list[Chunk]:
     """Split text into fixed-size overlapping chunks."""
-    enc = tiktoken.get_encoding("cl100k_base")
-    tokens = enc.encode(text)
+    enc = _get_encoding()
+    tokens = enc.encode(text, disallowed_special=())
 
     chunks: list[Chunk] = []
     start = 0

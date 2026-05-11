@@ -89,7 +89,7 @@ class SearchEngine:
 
         async for session in get_session():
             # Build the query with filters
-            filter_clauses = self._build_filters(source_filter, tags, author)
+            filter_clauses, filter_params = self._build_filters(source_filter, tags, author)
 
             sql = text(f"""
                 SELECT
@@ -112,7 +112,7 @@ class SearchEngine:
 
             result = await session.execute(
                 sql,
-                {"embedding": str(query_embedding), "limit": limit},
+                {"embedding": str(query_embedding), "limit": limit, **filter_params},
             )
             rows = result.fetchall()
 
@@ -150,7 +150,7 @@ class SearchEngine:
         author: str | None,
     ) -> SearchResults:
         """PostgreSQL full-text search."""
-        filter_clauses = self._build_filters(source_filter, tags, author)
+        filter_clauses, filter_params = self._build_filters(source_filter, tags, author)
 
         async for session in get_session():
             sql = text(f"""
@@ -164,7 +164,7 @@ class SearchEngine:
                     d.tags,
                     d.metadata,
                     ts_rank_cd(
-                        to_tsvector('english', c.content),
+                        c.content_tsvector,
                         plainto_tsquery('english', :query)
                     ) AS score,
                     ts_headline(
@@ -175,13 +175,13 @@ class SearchEngine:
                     ) AS highlights
                 FROM chunks c
                 JOIN documents d ON c.document_id = d.id
-                WHERE to_tsvector('english', c.content) @@ plainto_tsquery('english', :query)
+                WHERE c.content_tsvector @@ plainto_tsquery('english', :query)
                 {filter_clauses}
                 ORDER BY score DESC
                 LIMIT :limit
             """)
 
-            result = await session.execute(sql, {"query": query, "limit": limit})
+            result = await session.execute(sql, {"query": query, "limit": limit, **filter_params})
             rows = result.fetchall()
 
             results = [
@@ -219,7 +219,7 @@ class SearchEngine:
     ) -> SearchResults:
         """Hybrid search using Reciprocal Rank Fusion (RRF)."""
         query_embedding = await self.embedding_service.embed_query(query)
-        filter_clauses = self._build_filters(source_filter, tags, author)
+        filter_clauses, filter_params = self._build_filters(source_filter, tags, author)
 
         # RRF combines vector and FTS results
         # k=60 is the standard RRF constant
@@ -241,12 +241,12 @@ class SearchEngine:
                     SELECT
                         c.id AS chunk_id,
                         ts_rank_cd(
-                            to_tsvector('english', c.content),
+                            c.content_tsvector,
                             plainto_tsquery('english', :query)
                         ) AS rank_score,
                         ROW_NUMBER() OVER (
                             ORDER BY ts_rank_cd(
-                                to_tsvector('english', c.content),
+                                c.content_tsvector,
                                 plainto_tsquery('english', :query)
                             ) DESC
                         ) AS rank_f,
@@ -258,7 +258,7 @@ class SearchEngine:
                         ) AS highlights
                     FROM chunks c
                     JOIN documents d ON c.document_id = d.id
-                    WHERE to_tsvector('english', c.content) @@ plainto_tsquery('english', :query)
+                    WHERE c.content_tsvector @@ plainto_tsquery('english', :query)
                     {filter_clauses}
                     ORDER BY rank_score DESC
                     LIMIT 50
@@ -301,6 +301,7 @@ class SearchEngine:
                     "limit": limit,
                     "weight_vector": self.search_config.hybrid_weight_vector,
                     "weight_fts": self.search_config.hybrid_weight_fts,
+                    **filter_params,
                 },
             )
             rows = result.fetchall()
@@ -395,16 +396,32 @@ class SearchEngine:
         source: str | None,
         tags: list[str] | None,
         author: str | None,
-    ) -> str:
-        """Build SQL WHERE clauses for filtering."""
+    ) -> tuple[str, dict]:
+        """Build SQL WHERE clauses for filtering using parameterized queries.
+
+        Returns:
+            Tuple of (filter_sql_fragment, params_dict) where params_dict
+            contains named parameters to be merged into session.execute() calls.
+            Parameter names are prefixed with 'flt_' to avoid collisions with
+            existing query parameters (embedding, query, limit, etc.).
+        """
         clauses = []
+        params: dict = {}
+
         if source:
-            clauses.append(f"AND d.source = '{source}'")
+            clauses.append("AND d.source = :flt_source")
+            params["flt_source"] = source
+
         if author:
-            clauses.append(f"AND d.author ILIKE '%{author}%'")
+            clauses.append("AND d.author ILIKE :flt_author")
+            params["flt_author"] = f"%{author}%"
+
         if tags:
-            tag_conditions = " OR ".join(
-                f"d.tags @> '\"{tag}\"'::jsonb" for tag in tags
-            )
-            clauses.append(f"AND ({tag_conditions})")
-        return " ".join(clauses)
+            tag_conditions = []
+            for i, tag in enumerate(tags):
+                pname = f"flt_tag_{i}"
+                tag_conditions.append(f"d.tags @> :{pname}::jsonb")
+                params[pname] = f'"{tag}"'
+            clauses.append(f"AND ({' OR '.join(tag_conditions)})")
+
+        return " ".join(clauses), params

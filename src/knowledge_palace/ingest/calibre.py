@@ -24,6 +24,36 @@ class CalibreBridge:
         if not self.db_path.exists():
             raise FileNotFoundError(f"Calibre metadata.db not found at {self.db_path}")
 
+        # Build a lookup: book_id -> actual filesystem path (discovered from disk)
+        self._book_path_cache: dict[int, Path] | None = None
+
+    def _build_path_cache(self) -> dict[int, Path]:
+        """Scan the library directory to discover book files by ID.
+
+        Calibre stores files as: Author/Title (ID)/file.format
+        We extract the ID from the directory name pattern '(123)'.
+        """
+        cache: dict[int, Path] = {}
+        import re
+
+        id_pattern = re.compile(r"\((\d+)\)\s*$")
+
+        for item in self.library_path.rglob("*"):
+            if not item.is_dir():
+                continue
+            match = id_pattern.search(item.name)
+            if match:
+                book_id = int(match.group(1))
+                cache[book_id] = item
+
+        return cache
+
+    def _get_book_dir(self, book_id: int) -> Path | None:
+        """Find the directory for a book by ID, using the filesystem cache."""
+        if self._book_path_cache is None:
+            self._book_path_cache = self._build_path_cache()
+        return self._book_path_cache.get(book_id)
+
     def get_books(self) -> list[dict]:
         """Read all books from Calibre metadata.db."""
         conn = sqlite3.connect(str(self.db_path))
@@ -58,44 +88,61 @@ class CalibreBridge:
         return books
 
     def get_book_file(self, book: dict, preferred_format: str = "EPUB") -> Path | None:
-        """Find the actual file path for a book, preferring the given format."""
-        formats = (book.get("formats") or "").split(",")
-        authors = (book.get("authors") or "Unknown").split(",")[0].strip()
-        title = book.get("title", "Unknown")
+        """Find the actual file path for a book.
+
+        Strategy:
+        1. Look up the book's directory by ID from the filesystem cache
+        2. Search inside that directory for the preferred format
+        3. Fallback to other formats
+        4. Last resort: search the entire library for loose files matching the title
+        """
         book_id = book.get("id", 0)
+        formats_str = book.get("formats") or ""
+        available_formats = [f.strip().upper() for f in formats_str.split(",") if f.strip()]
 
-        # Try preferred format first, then fallbacks
-        format_priority = [preferred_format, "EPUB", "PDF", "TXT", "MOBI"]
+        # Format priority: preferred first, then standard order
+        format_priority = [preferred_format]
+        for fmt in ["EPUB", "PDF", "TXT", "MOBI"]:
+            if fmt not in format_priority:
+                format_priority.append(fmt)
+
+        # Strategy 1: Use the path cache to find the book directory
+        book_dir = self._get_book_dir(book_id)
+        if book_dir and book_dir.is_dir():
+            for fmt in format_priority:
+                if fmt not in available_formats:
+                    continue
+                # Look for the file in the book directory
+                for f in book_dir.iterdir():
+                    if f.is_file() and f.suffix.lower() == f".{fmt.lower()}":
+                        return f
+
+        # Strategy 2: Search for loose files at the top level
+        # (some Calibre exports put files directly in the library root)
+        title = book.get("title", "")
         for fmt in format_priority:
-            if fmt in formats:
-                # Calibre stores files as: Author Name/Title (ID)/Title - Author.format
-                author_dir = authors.replace("/", "_")
-                title_dir = f"{title} ({book_id})"
-                # Sanitize for filesystem
-                for ch in ['\\', '<', '>', ':', '"', '|', '?', '*']:
-                    author_dir = author_dir.replace(ch, '_')
-                    title_dir = title_dir.replace(ch, '_')
-                
-                file_name = f"{title} - {authors}"
-                for ch in ['\\', '<', '>', ':', '"', '|', '?', '*']:
-                    file_name = file_name.replace(ch, '_')
-                
-                file_name += f".{fmt.lower()}"
+            if fmt not in available_formats:
+                continue
+            # Check top-level files
+            ext = f".{fmt.lower()}"
+            for f in self.library_path.iterdir():
+                if f.is_file() and f.suffix.lower() == ext:
+                    # Rough match: check if title appears in filename
+                    if title and title.lower().replace(" ", "")[:20] in f.name.lower().replace(" ", ""):
+                        return f
 
-                candidates = [
-                    self.library_path / author_dir / title_dir / file_name,
-                ]
-                
-                # Try to find the file with glob as fallback
-                for candidate in candidates:
-                    if candidate.exists():
-                        return candidate
-                
-                # Glob fallback
-                pattern = f"**/{book_id}/**/*.{fmt.lower()}"
-                matches = list(self.library_path.glob(pattern))
-                if matches:
-                    return matches[0]
+        # Strategy 3: Glob search in author directories
+        authors = (book.get("authors") or "Unknown").split(",")[0].strip()
+        for fmt in format_priority:
+            if fmt not in available_formats:
+                continue
+            ext = f".{fmt.lower()}"
+            # Look in author-name directories
+            for f in self.library_path.rglob(f"*{ext}"):
+                # Check if book_id in the parent dir name
+                parent = f.parent.name
+                if f"({book_id})" in parent:
+                    return f
 
         return None
 
