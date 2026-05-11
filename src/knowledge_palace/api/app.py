@@ -98,8 +98,8 @@ def create_app(config: Config) -> FastAPI:
             query=results.query,
             results=[
                 SearchResultItem(
-                    chunk_id=r.chunk_id,
-                    document_id=r.document_id,
+                    chunk_id=str(r.chunk_id),
+                    document_id=str(r.document_id),
                     content=r.content,
                     score=r.score,
                     title=r.title,
@@ -124,8 +124,8 @@ def create_app(config: Config) -> FastAPI:
             total=results.total,
             results=[
                 SearchResultItem(
-                    chunk_id=r.chunk_id,
-                    document_id=r.document_id,
+                    chunk_id=str(r.chunk_id),
+                    document_id=str(r.document_id),
                     content=r.content,
                     score=r.score,
                     title=r.title,
@@ -172,7 +172,7 @@ def create_app(config: Config) -> FastAPI:
                 limit=limit,
                 documents=[
                     DocumentListItem(
-                        id=doc.id,
+                        id=str(doc.id),
                         title=doc.title,
                         author=doc.author,
                         source=doc.source,
@@ -196,7 +196,7 @@ def create_app(config: Config) -> FastAPI:
             if doc is None:
                 raise HTTPException(404, "Document not found")
             return DocumentResponse(
-                id=doc.id,
+                id=str(doc.id),
                 title=doc.title,
                 author=doc.author,
                 source=doc.source,
