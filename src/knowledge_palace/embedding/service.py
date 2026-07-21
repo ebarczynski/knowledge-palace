@@ -6,12 +6,17 @@ MLX is Apple's machine learning framework optimized for Apple Silicon:
 - Lower memory footprint (shared memory architecture)
 - Supports quantization (4-bit/8-bit) for even faster inference
 
-Falls back to ONNX Runtime, then PyTorch if MLX is unavailable.
+Backend selection is model-aware: MLX is only attempted when the configured
+model's architecture is supported by `mlx-embeddings` (e.g. bert, modernbert,
+siglip). Architectures like nomic_bert are unsupported upstream, so we skip
+MLX for them and fall back to ONNX Runtime, then PyTorch.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import pkgutil
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -20,7 +25,10 @@ from rich.console import Console
 if TYPE_CHECKING:
     from ..config import EmbeddingConfig
 
-console = Console()
+# Status/loading messages go to stderr so they never corrupt protocols that
+# use stdout for data (e.g. the MCP stdio JSON-RPC stream). They still appear
+# in the terminal for CLI/serve use.
+console = Console(stderr=True)
 
 
 class EmbeddingService:
@@ -30,6 +38,43 @@ class EmbeddingService:
         self.config = config
         self._model = None
         self._backend = None  # "mlx", "onnx", "pytorch"
+
+    # ------------------------------------------------------------------
+    # Backend selection
+    # ------------------------------------------------------------------
+
+    def _supported_mlx_architectures(self) -> set[str]:
+        """Return the model architectures `mlx_embeddings` can load."""
+        try:
+            import mlx_embeddings.models as m
+        except ImportError:
+            return set()
+        return {
+            name
+            for name in pkgutil.iter_modules(m.__path__)
+        } - {"base"}
+
+    def _is_mlx_supported(self) -> bool:
+        """True if mlx-embeddings can load the configured model's architecture.
+
+        We read the model's `model_type` from its HuggingFace config and check
+        it against the architectures mlx-embeddings ships modules for. This
+        avoids a guaranteed-to-fail model load (and its noisy traceback) for
+        unsupported architectures such as nomic_bert.
+        """
+        try:
+            from huggingface_hub import hf_hub_download
+        except ImportError:
+            return False
+        try:
+            cfg_path = hf_hub_download(self.config.model, "config.json")
+            model_type = json.load(open(cfg_path)).get("model_type", "")
+        except Exception:
+            # Can't read config — let _load_mlx attempt and surface the real error.
+            return True
+        supported = self._supported_mlx_architectures()
+        # mlx_embeddings maps model_type -> submodule name (dashes -> underscores)
+        return model_type.replace("-", "_") in supported
 
     def _load_mlx(self):
         """Try to load model with MLX backend (Apple Silicon only)."""
@@ -72,14 +117,21 @@ class EmbeddingService:
         if self._model is not None:
             return self._model
 
-        # Try backends in order of preference for Apple Silicon
-        try:
-            self._model = self._load_mlx()
-            self._backend = "mlx"
-            console.print("[green]Model loaded (MLX backend - Apple Metal)[/green]")
-            return self._model
-        except Exception as e:
-            console.print(f"[dim]MLX unavailable: {e}[/dim]")
+        # MLX: only attempt when the model architecture is actually supported
+        # by mlx-embeddings (e.g. nomic_bert is not — see _is_mlx_supported).
+        if self._is_mlx_supported():
+            try:
+                self._model = self._load_mlx()
+                self._backend = "mlx"
+                console.print("[green]Model loaded (MLX backend - Apple Metal)[/green]")
+                return self._model
+            except Exception as e:
+                console.print(f"[dim]MLX unavailable: {e}[/dim]")
+        else:
+            console.print(
+                f"[dim]MLX skipped: architecture of "
+                f"{self.config.model} is not supported by mlx-embeddings[/dim]"
+            )
 
         try:
             self._model = self._load_onnx()

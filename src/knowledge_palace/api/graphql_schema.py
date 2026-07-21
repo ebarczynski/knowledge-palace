@@ -7,6 +7,7 @@ from typing import Optional
 import enum
 
 import strawberry
+from strawberry.scalars import JSON
 from strawberry.types import Info
 
 from ..search.engine import SearchEngine, SearchResult
@@ -23,6 +24,7 @@ class ChunkType:
     source: str
     tags: list[str]
     highlights: list[str]
+    provenance: Optional[JSON] = None
 
     @classmethod
     def from_search_result(cls, r: SearchResult) -> ChunkType:
@@ -36,6 +38,7 @@ class ChunkType:
             source=r.source,
             tags=r.tags,
             highlights=r.highlights,
+            provenance=r.provenance,
         )
 
 
@@ -113,6 +116,32 @@ class Query:
         )
 
     @strawberry.field
+    async def context(
+        self,
+        info: Info,
+        query: str,
+        limit: Optional[int] = 10,
+        max_variants: Optional[int] = 6,
+        source: Optional[str] = None,
+        author: Optional[str] = None,
+    ) -> SearchResultType:
+        """Multi-query retrieval: expand variants, fuse across modes via RRF."""
+        engine = _get_engine(info)
+        results = await engine.retrieve_context(
+            query,
+            limit=limit,
+            max_variants=max_variants,
+            source_filter=source,
+            author=author,
+        )
+        return SearchResultType(
+            total=results.total,
+            mode=results.mode,
+            query=results.query,
+            chunks=[ChunkType.from_search_result(r) for r in results.results],
+        )
+
+    @strawberry.field
     async def documents(
         self,
         info: Info,
@@ -121,9 +150,9 @@ class Query:
         limit: Optional[int] = None,
     ) -> list[DocumentType]:
         from sqlalchemy import select
-        from ..db import Document, get_session
+        from ..db import Document, session_context
 
-        async for session in get_session():
+        async with session_context() as session:
             stmt = select(Document)
             if source:
                 stmt = stmt.where(Document.source == source)
@@ -142,7 +171,6 @@ class Query:
                 )
                 for doc in docs
             ]
-        return []
 
 
 schema = strawberry.Schema(query=Query)

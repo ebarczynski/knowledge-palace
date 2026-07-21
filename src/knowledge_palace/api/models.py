@@ -19,6 +19,7 @@ class SearchResultItem(BaseModel):
     source: str
     tags: list[str]
     highlights: list[str]
+    provenance: dict = {}
 
 
 class SearchResponse(BaseModel):

@@ -14,11 +14,16 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0",
     # Embeddings & ML
     "sentence-transformers>=4.0",
+    # ONNX is the preferred embedding backend (2-3x faster than PyTorch on CPU,
+    # and the best available option on Apple Silicon since MLX cannot load
+    # nomic_bert). optimum + onnxruntime together enable sentence-transformers'
+    # `backend="onnx"`. Pin transformers to 4.x for optimum compatibility.
     "onnxruntime>=1.18",
+    "optimum[onnxruntime]>=1.23",
     "torch>=2.5",
     "einops>=0.8",
     "numpy>=2.0",
-    "transformers>=4.45",
+    "transformers>=4.45,<5.0",
     "safetensors>=0.5",
     "huggingface-hub>=0.30",
     # Document extraction
@@ -39,12 +44,17 @@ dependencies = [
     "pgvector>=0.4.2",
 ]
 
-[project.optional-dependencies]
-mlx = [
-    "mlx>=0.25",
-    "mlx-embeddings>=0.1",
-    "mlx-lm>=0.30",
-]
+# No optional [project.optional-dependencies] declared.
+#
+# MLX acceleration for Apple Silicon is NOT provided as an installable extra
+# because mlx-embeddings requires transformers>=5.0, which conflicts with the
+# `optimum`/ONNX backend (transformers<5.0). MLX also cannot load the default
+# nomic-embed-text model (its nomic_bert architecture is unsupported upstream).
+#
+# The embedding service still auto-detects MLX: if you install mlx-embeddings
+# manually (`uv pip install mlx mlx-embeddings mlx-lm`) and use an
+# MLX-compatible model (bert, modernbert, siglip, qwen3, ...), it will be used.
+# For nomic-embed-text, ONNX Runtime is the fastest available backend.
 
 [project.scripts]
 kp = "knowledge_palace.cli:cli"
