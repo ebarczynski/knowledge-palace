@@ -37,5 +37,7 @@ hybrid_weight_fts = 0.3
 default_limit = 10
 
 [api]
-host = "0.0.0.0"
+# 127.0.0.1 = local-only access (no LAN exposure). Use 0.0.0.0 to allow
+# other devices on the network to reach the API.
+host = "127.0.0.1"
 port = 8080

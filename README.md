@@ -21,9 +21,20 @@ that only you can access.
 
 ### 1. Install PostgreSQL with pgvector
 
+On macOS, the bundled script does everything (installs Homebrew packages,
+starts the service, creates the `kp` role + `knowledge_palace` database +
+pgvector extension — all idempotent):
+
+```bash
+bash scripts/setup-postgres-macos.sh
+```
+
+Manual alternatives:
+
 ```bash
 # macOS (Homebrew)
-brew install postgresql@16 pgvector
+brew install postgresql@17 pgvector
+brew services start postgresql@17
 
 # Ubuntu/Debian
 sudo apt install postgresql-16 postgresql-16-pgvector
@@ -40,8 +51,10 @@ docker run -d --name kp-postgres \
 Helper scripts are provided:
 
 ```bash
-scripts/setup-postgres.sh         # apt-based install (run with sudo)
-scripts/setup-postgres-docker.sh  # Docker-based install (no root needed)
+scripts/setup-postgres-macos.sh    # macOS local setup (idempotent, recommended)
+scripts/setup-postgres.sh          # apt-based install (run with sudo)
+scripts/setup-postgres-docker.sh   # Docker-based install (no root needed)
+scripts/migrate-to-host.sh         # move the DB+library to another Mac over LAN
 ```
 
 ### 2. Install Knowledge Palace
