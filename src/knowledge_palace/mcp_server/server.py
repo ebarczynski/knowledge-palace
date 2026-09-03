@@ -89,10 +89,48 @@ TOOLS = [
             "required": ["question"],
         },
     ),
+    Tool(
+        name="context",
+        description=(
+            "Gather broad, de-duplicated context for a task in one call. Expands the "
+            "query into synonym/paraphrase variants, runs each across keyword + "
+            "semantic + hybrid search, and fuses results via Reciprocal Rank Fusion. "
+            "Use this when you need comprehensive grounded context for implementing "
+            "or reasoning about a topic (e.g. a whole pipeline), rather than a quick "
+            "lookup. Each result includes provenance (source file, chunk index, format)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The task or topic to gather context for",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max fused results (default: 10)",
+                },
+                "max_variants": {
+                    "type": "integer",
+                    "description": "Cap on query variants to bound retrieval cost (default: 6)",
+                },
+                "source": {
+                    "type": "string",
+                    "enum": ["calibre", "file"],
+                    "description": "Filter by source type",
+                },
+                "author": {
+                    "type": "string",
+                    "description": "Filter by author name",
+                },
+            },
+            "required": ["query"],
+        },
+    ),
 ]
 
 
-def format_results(results) -> str:
+def format_results(results, show_provenance: bool = False) -> str:
     """Format search results as readable text."""
     if not results.results:
         return "No results found."
@@ -106,6 +144,19 @@ def format_results(results) -> str:
         lines.append(f"Source: {r.source}")
         if r.tags:
             lines.append(f"Tags: {', '.join(r.tags)}")
+        if show_provenance and getattr(r, "provenance", None):
+            prov_parts = []
+            p = r.provenance
+            if "format" in p:
+                prov_parts.append(p["format"])
+            if "chunk_index" in p:
+                prov_parts.append(f"chunk {p['chunk_index']}")
+            if p.get("file_path"):
+                # show just the filename, not the full path
+                from pathlib import Path
+                prov_parts.append(Path(p["file_path"]).name)
+            if prov_parts:
+                lines.append(f"Provenance: {' · '.join(prov_parts)}")
         lines.append(f"\n{r.content[:500]}")
         if len(r.content) > 500:
             lines.append("...")
@@ -161,6 +212,23 @@ async def run_mcp_server(config: Config) -> None:
                 lines.append(r.content)
                 lines.append("")
             return [TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "context":
+            # Multi-query retrieval: expand variants, run across modes, RRF-fuse.
+            results = await search_engine.retrieve_context(
+                query=arguments["query"],
+                limit=arguments.get("limit", 10),
+                max_variants=arguments.get("max_variants", 6),
+                source_filter=arguments.get("source"),
+                author=arguments.get("author"),
+            )
+            if not results.results:
+                return [TextContent(type="text", text="No relevant context found in your knowledge base.")]
+            header = (
+                f"Gathered {results.total} fused context passages "
+                f"(multi-query retrieval across keyword/semantic/hybrid):\n"
+            )
+            return [TextContent(type="text", text=header + format_results(results, show_provenance=True))]
 
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 

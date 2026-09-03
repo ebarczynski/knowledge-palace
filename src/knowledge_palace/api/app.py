@@ -107,6 +107,7 @@ def create_app(config: Config) -> FastAPI:
                     source=r.source,
                     tags=r.tags,
                     highlights=r.highlights,
+                    provenance=r.provenance or {},
                 )
                 for r in results.results
             ],
@@ -133,6 +134,50 @@ def create_app(config: Config) -> FastAPI:
                     source=r.source,
                     tags=r.tags,
                     highlights=r.highlights,
+                    provenance=r.provenance or {},
+                )
+                for r in results.results
+            ],
+        )
+
+    @app.get("/api/v1/context", response_model=SearchResponse)
+    async def gather_context(
+        q: str = Query(..., description="Task or topic to gather context for"),
+        limit: int = Query(10, ge=1, le=50, description="Max fused results"),
+        max_variants: int = Query(6, ge=1, le=12, description="Cap on query variants"),
+        source: str | None = Query(None, description="Filter by source"),
+        author: str | None = Query(None, description="Filter by author"),
+    ):
+        """Multi-query retrieval: expand query variants, fuse across modes via RRF.
+
+        Returns the same shape as /search (``SearchResponse``) so callers can
+        drop it in, but ``mode`` is ``"context"`` and results are de-duplicated
+        fused passages with provenance.
+        """
+        engine = get_search_engine()
+        results = await engine.retrieve_context(
+            q,
+            limit=limit,
+            max_variants=max_variants,
+            source_filter=source,
+            author=author,
+        )
+        return SearchResponse(
+            total=results.total,
+            mode=results.mode,
+            query=results.query,
+            results=[
+                SearchResultItem(
+                    chunk_id=r.chunk_id,
+                    document_id=r.document_id,
+                    content=r.content,
+                    score=r.score,
+                    title=r.title,
+                    author=r.author,
+                    source=r.source,
+                    tags=r.tags,
+                    highlights=r.highlights,
+                    provenance=r.provenance or {},
                 )
                 for r in results.results
             ],
@@ -146,9 +191,9 @@ def create_app(config: Config) -> FastAPI:
         offset: int = Query(0, ge=0),
     ):
         from sqlalchemy import select, func as sa_func
-        from ..db import get_session
+        from ..db import session_context
 
-        async for session in get_session():
+        async with session_context() as session:
             query = select(Document).order_by(Document.created_at.desc())
             count_query = select(sa_func.count()).select_from(Document)
 
@@ -186,9 +231,9 @@ def create_app(config: Config) -> FastAPI:
     @app.get("/api/v1/documents/{document_id}", response_model=DocumentResponse)
     async def get_document(document_id: str):
         from sqlalchemy import select
-        from ..db import get_session
+        from ..db import session_context
 
-        async for session in get_session():
+        async with session_context() as session:
             result = await session.execute(
                 select(Document).where(Document.id == document_id)
             )

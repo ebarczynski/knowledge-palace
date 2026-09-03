@@ -5,10 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from sqlalchemy import text, select
+from sqlalchemy import text as sql_text, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import Document, Chunk, get_session
+from ..db import Document, Chunk, session_context
 from ..embedding.service import EmbeddingService
 from ..config import Config, SearchConfig
 
@@ -26,6 +26,37 @@ class SearchResult:
     tags: list[str]
     highlights: list[str]
     metadata: dict
+    provenance: dict = None  # populated from DB columns (chunk_index, file_path, ...)
+
+
+def _build_provenance(row, doc_metadata: dict) -> dict:
+    """Assemble a provenance dict from a result row + document metadata.
+
+    ``row`` exposes ``chunk_index``/``file_path``/``calibre_id`` (added to each
+    search SQL query); ``format``/``page_count`` live in the document metadata
+    JSONB that every query already fetches. None values are omitted so callers
+    get a compact, honest dict. Section headings and exact page numbers are not
+    available (extraction discards them) — see README limitations.
+    """
+    prov = {}
+    # chunk-level
+    chunk_index = getattr(row, "chunk_index", None)
+    if chunk_index is not None:
+        prov["chunk_index"] = chunk_index
+    # document-level columns
+    file_path = getattr(row, "file_path", None)
+    if file_path:
+        prov["file_path"] = file_path
+    calibre_id = getattr(row, "calibre_id", None)
+    if calibre_id is not None:
+        prov["calibre_id"] = calibre_id
+    # document-level fields nested in metadata JSONB
+    if doc_metadata:
+        for key in ("format", "page_count"):
+            val = doc_metadata.get(key)
+            if val is not None:
+                prov[key] = val
+    return prov
 
 
 @dataclass
@@ -76,6 +107,61 @@ class SearchEngine:
         else:
             raise ValueError(f"Unknown search mode: {mode}")
 
+    async def retrieve_context(
+        self,
+        query: str,
+        limit: int = 10,
+        max_variants: int = 6,
+        source_filter: str | None = None,
+        author: str | None = None,
+    ) -> SearchResults:
+        """Multi-query retrieval for agent context gathering.
+
+        Generates textual variants of ``query`` (rule-based synonym expansion,
+        see :mod:`knowledge_palace.retrieval.expand`), runs each variant in all
+        three search modes (keyword / semantic / hybrid), and fuses the ranked
+        lists with Reciprocal Rank Fusion, de-duplicating by chunk id.
+
+        This lets an agent harness gather broad, de-duplicated, ranked context
+        in a single call instead of orchestrating many searches. The original
+        (user) query is weighted higher than auto-expanded variants.
+
+        Args:
+            query: the task or question to gather context for.
+            limit: number of fused results to return.
+            max_variants: cap on textual variants (bounds retrieval cost).
+            source_filter / author: passed through to each search.
+        """
+        from ..retrieval import expand_queries, fuse
+
+        variants = expand_queries(query, max_variants=max_variants)
+
+        # fetch more per sub-search than `limit` so fusion has depth to work with
+        per_search = max(limit * 3, 20)
+        ranked_lists: list[list[SearchResult]] = []
+        weights: list[float] = []
+
+        for i, variant in enumerate(variants):
+            # original query weighted 2x; expansions weighted 1x
+            weight = 2.0 if i == 0 else 1.0
+            for mode in ("keyword", "semantic", "hybrid"):
+                res = await self.search(
+                    variant,
+                    mode=mode,
+                    limit=per_search,
+                    source_filter=source_filter,
+                    author=author,
+                )
+                if res.results:
+                    ranked_lists.append(res.results)
+                    weights.append(weight)
+
+        if not ranked_lists:
+            return SearchResults(results=[], total=0, mode="context", query=query)
+
+        fused = fuse(ranked_lists, weights=weights)[:limit]
+        return SearchResults(results=fused, total=len(fused), mode="context", query=query)
+
     async def _semantic_search(
         self,
         query: str,
@@ -87,20 +173,23 @@ class SearchEngine:
         """Vector similarity search using pgvector."""
         query_embedding = await self.embedding_service.embed_query(query)
 
-        async for session in get_session():
+        async with session_context() as session:
             # Build the query with filters
             filter_clauses, filter_params = self._build_filters(source_filter, tags, author)
 
-            sql = text(f"""
+            sql = sql_text(f"""
                 SELECT
                     c.id AS chunk_id,
                     c.document_id,
                     c.content,
+                    c.chunk_index,
                     d.title,
                     d.author,
                     d.source,
                     d.tags,
                     d.metadata,
+                    d.file_path,
+                    d.calibre_id,
                     1 - (c.embedding <=> :embedding) AS score
                 FROM chunks c
                 JOIN documents d ON c.document_id = d.id
@@ -118,8 +207,8 @@ class SearchEngine:
 
             results = [
                 SearchResult(
-                    chunk_id=row.chunk_id,
-                    document_id=row.document_id,
+                    chunk_id=str(row.chunk_id),
+                    document_id=str(row.document_id),
                     content=row.content,
                     score=float(row.score),
                     title=row.title,
@@ -128,6 +217,7 @@ class SearchEngine:
                     tags=row.tags or [],
                     highlights=[],
                     metadata=row.metadata or {},
+                    provenance=_build_provenance(row, row.metadata or {}),
                 )
                 for row in rows
             ]
@@ -138,8 +228,6 @@ class SearchEngine:
                 mode="semantic",
                 query=query,
             )
-
-        return SearchResults(results=[], total=0, mode="semantic", query=query)
 
     async def _keyword_search(
         self,
@@ -152,17 +240,20 @@ class SearchEngine:
         """PostgreSQL full-text search."""
         filter_clauses, filter_params = self._build_filters(source_filter, tags, author)
 
-        async for session in get_session():
-            sql = text(f"""
+        async with session_context() as session:
+            sql = sql_text(f"""
                 SELECT
                     c.id AS chunk_id,
                     c.document_id,
                     c.content,
+                    c.chunk_index,
                     d.title,
                     d.author,
                     d.source,
                     d.tags,
                     d.metadata,
+                    d.file_path,
+                    d.calibre_id,
                     ts_rank_cd(
                         c.content_tsvector,
                         plainto_tsquery('english', :query)
@@ -186,8 +277,8 @@ class SearchEngine:
 
             results = [
                 SearchResult(
-                    chunk_id=row.chunk_id,
-                    document_id=row.document_id,
+                    chunk_id=str(row.chunk_id),
+                    document_id=str(row.document_id),
                     content=row.content,
                     score=float(row.score),
                     title=row.title,
@@ -196,6 +287,7 @@ class SearchEngine:
                     tags=row.tags or [],
                     highlights=[row.highlights] if row.highlights else [],
                     metadata=row.metadata or {},
+                    provenance=_build_provenance(row, row.metadata or {}),
                 )
                 for row in rows
             ]
@@ -206,8 +298,6 @@ class SearchEngine:
                 mode="keyword",
                 query=query,
             )
-
-        return SearchResults(results=[], total=0, mode="keyword", query=query)
 
     async def _hybrid_search(
         self,
@@ -223,8 +313,8 @@ class SearchEngine:
 
         # RRF combines vector and FTS results
         # k=60 is the standard RRF constant
-        async for session in get_session():
-            sql = text(f"""
+        async with session_context() as session:
+            sql = sql_text(f"""
                 WITH vector_results AS (
                     SELECT
                         c.id AS chunk_id,
@@ -282,11 +372,14 @@ class SearchEngine:
                     rrf.highlights,
                     c.content,
                     c.document_id,
+                    c.chunk_index,
                     d.title,
                     d.author,
                     d.source,
                     d.tags,
-                    d.metadata
+                    d.metadata,
+                    d.file_path,
+                    d.calibre_id
                 FROM rrf
                 JOIN chunks c ON rrf.chunk_id = c.id
                 JOIN documents d ON c.document_id = d.id
@@ -308,8 +401,8 @@ class SearchEngine:
 
             results = [
                 SearchResult(
-                    chunk_id=row.chunk_id,
-                    document_id=row.document_id,
+                    chunk_id=str(row.chunk_id),
+                    document_id=str(row.document_id),
                     content=row.content,
                     score=float(row.rrf_score),
                     title=row.title,
@@ -318,6 +411,7 @@ class SearchEngine:
                     tags=row.tags or [],
                     highlights=[row.highlights] if row.highlights else [],
                     metadata=row.metadata or {},
+                    provenance=_build_provenance(row, row.metadata or {}),
                 )
                 for row in rows
             ]
@@ -329,8 +423,6 @@ class SearchEngine:
                 query=query,
             )
 
-        return SearchResults(results=[], total=0, mode="hybrid", query=query)
-
     async def find_similar(
         self,
         text: str,
@@ -340,17 +432,20 @@ class SearchEngine:
         """Find chunks similar to the given text (vector-only search)."""
         query_embedding = await self.embedding_service.embed_query(text)
 
-        async for session in get_session():
-            sql = text("""
+        async with session_context() as session:
+            sql = sql_text("""
                 SELECT
                     c.id AS chunk_id,
                     c.document_id,
                     c.content,
+                    c.chunk_index,
                     d.title,
                     d.author,
                     d.source,
                     d.tags,
                     d.metadata,
+                    d.file_path,
+                    d.calibre_id,
                     1 - (c.embedding <=> :embedding) AS similarity
                 FROM chunks c
                 JOIN documents d ON c.document_id = d.id
@@ -368,8 +463,8 @@ class SearchEngine:
 
             results = [
                 SearchResult(
-                    chunk_id=row.chunk_id,
-                    document_id=row.document_id,
+                    chunk_id=str(row.chunk_id),
+                    document_id=str(row.document_id),
                     content=row.content,
                     score=float(row.similarity),
                     title=row.title,
@@ -378,6 +473,7 @@ class SearchEngine:
                     tags=row.tags or [],
                     highlights=[],
                     metadata=row.metadata or {},
+                    provenance=_build_provenance(row, row.metadata or {}),
                 )
                 for row in rows
             ]
@@ -388,8 +484,6 @@ class SearchEngine:
                 mode="similar",
                 query=text,
             )
-
-        return SearchResults(results=[], total=0, mode="similar", query=text)
 
     def _build_filters(
         self,

@@ -12,6 +12,9 @@ from rich.table import Table
 from .config import Config
 
 console = Console()
+# MCP uses stdio for JSON-RPC, so anything meant for humans on that transport
+# must go to stderr to avoid corrupting the protocol stream on stdout.
+err_console = Console(stderr=True)
 
 
 def load_config(config_path: str | None) -> Config:
@@ -106,7 +109,10 @@ def serve(ctx, host: str | None, port: int | None):
     console.print(f"  GraphQL: http://{host}:{port}/graphql")
     console.print(f"  Docs:    http://{host}:{port}/docs\n")
 
-    uvicorn.run(app, host=host, port=port)
+    # ws="none": the API is HTTP-only (GraphQL has no Subscriptions), so
+    # disable WebSocket support. This also prevents uvicorn from importing
+    # the deprecated websockets.legacy module (DeprecationWarning on startup).
+    uvicorn.run(app, host=host, port=port, ws="none")
 
 
 @cli.command()
@@ -116,7 +122,8 @@ def mcp(ctx):
     from .mcp_server.server import run_mcp_server
 
     config = ctx.obj["config"]
-    console.print("[dim]Starting Knowledge Palace MCP server...[/dim]")
+    # MCP uses stdio for JSON-RPC: keep stdout clean and log to stderr instead.
+    err_console.print("[dim]Starting Knowledge Palace MCP server...[/dim]")
     asyncio.run(run_mcp_server(config))
 
 
@@ -161,7 +168,10 @@ file_extensions = [".md", ".txt", ".org", ".rst"]
 
 [embedding]
 model = "nomic-ai/nomic-embed-text-v1.5"
-provider = "sentence-transformers"
+# Backend is auto-selected: ONNX Runtime (fastest for nomic on Apple Silicon),
+# then PyTorch. MLX is used automatically if the model architecture is
+# supported by mlx-embeddings (nomic_bert is not).
+provider = "auto"
 batch_size = 32
 dimensions = 768
 device = "cpu"

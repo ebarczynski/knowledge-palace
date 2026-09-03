@@ -3,10 +3,16 @@
 Processes books in small batches (default 10) to balance:
 - Memory: only hold N books' worth of text + embeddings at a time
 - Throughput: batch-embed all chunks from N books together (faster than 1-by-1)
+
+Optimizations:
+- Pipelined: extraction of batch N+1 overlaps with embedding of batch N
+- ONNX backend: 2-3x faster embedding when onnxruntime is installed
+- Float16 embeddings: halve memory and DB storage with negligible search quality loss
 """
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import logging
 
@@ -33,8 +39,8 @@ logger = logging.getLogger(__name__)
 
 # Process this many books per batch. Each batch is:
 # extracted → chunked → embedded together → committed → freed.
-# 10 books × ~350 avg chunks × 768 floats × 4 bytes ≈ 10MB embeddings.
-# Plus model (~1.2GB) + book text (~5-20MB) + torch overhead = ~2-3GB peak.
+# 10 books × ~350 avg chunks × 768 floats × 2 bytes (fp16) ≈ 5MB embeddings.
+# Plus model (~1.2GB) + book text (~5-20MB) + overhead = ~2-3GB peak.
 BOOKS_PER_BATCH = 10
 
 
@@ -78,12 +84,142 @@ class IngestionPipeline:
         return results
 
     # ------------------------------------------------------------------
-    # Calibre: batch of N books at a time
+    # Helper: extract and chunk a batch of books (CPU/IO-bound)
+    # ------------------------------------------------------------------
+
+    def _extract_batch(self, books, bridge, reindex: bool) -> list:
+        """Synchronous: extract and chunk a batch of books. Returns (doc, chunks) list.
+        
+        Note: dedup check is NOT done here (this runs in a thread, and asyncpg
+        connections are bound to the main event loop). Dedup happens in
+        _embed_and_commit_batch inside the same session as the insert.
+        """
+        batch_data = []
+        for book in books:
+            try:
+                doc = bridge.extract_book(book)
+                if doc is None:
+                    continue
+
+                chunks = chunk_text(
+                    doc.content,
+                    strategy=self.config.chunking.strategy,
+                    max_tokens=self.config.chunking.max_tokens,
+                    overlap_tokens=self.config.chunking.overlap_tokens,
+                    respect_headings=self.config.chunking.respect_headings,
+                )
+
+                if chunks:
+                    doc.content = ""  # free large text
+                    batch_data.append((doc, chunks))
+
+            except Exception as e:
+                logger.exception("Failed to extract %s", book.get("title", "?"))
+        return batch_data
+
+    async def _embed_and_commit_batch(
+        self,
+        batch_data: list,
+        results: dict,
+        total_processed: list,
+    ) -> int:
+        """Embed chunks and commit to DB. Returns count of books committed."""
+        if not batch_data:
+            return 0
+
+        from sqlalchemy import select
+
+        # Collect all chunk texts
+        all_texts = []
+        for _, chunks in batch_data:
+            all_texts.extend(c.content for c in chunks)
+
+        # Embed in sub-batches
+        try:
+            all_embeddings = []
+            embed_batch_size = self.config.embedding.batch_size
+            for start in range(0, len(all_texts), embed_batch_size):
+                end = min(start + embed_batch_size, len(all_texts))
+                batch_embs = await self.embedding_service.embed_batch(
+                    all_texts[start:end]
+                )
+                all_embeddings.extend(batch_embs)
+        except Exception as e:
+            results["errors"] += len(batch_data)
+            logger.exception("Embedding failed for batch")
+            return 0
+
+        # Commit each document
+        committed = 0
+        emb_offset = 0
+        for doc, chunks in batch_data:
+            try:
+                doc_embeddings = all_embeddings[emb_offset:emb_offset + len(chunks)]
+
+                async with session_context() as session:
+                    # Dedup check inside session (handles multi-format books)
+                    existing = await session.execute(
+                        select(Document).where(
+                            Document.content_hash == doc.content_hash
+                        )
+                    )
+                    if existing.scalar_one_or_none():
+                        emb_offset += len(chunks)
+                        continue
+
+                    desc = doc.metadata.get("description")
+                    if desc:
+                        desc = desc.replace("\x00", "")
+
+                    db_doc = Document(
+                        title=doc.title,
+                        author=doc.author,
+                        source=doc.source,
+                        file_path=doc.file_path,
+                        calibre_id=doc.metadata.get("calibre_id"),
+                        content_hash=doc.content_hash,
+                        description=desc,
+                        tags=doc.metadata.get("tags", []),
+                        metadata_=doc.metadata,
+                    )
+                    session.add(db_doc)
+                    await session.flush()
+
+                    for j, chunk in enumerate(chunks):
+                        db_chunk = Chunk(
+                            document_id=db_doc.id,
+                            content=chunk.content.replace("\x00", ""),
+                            chunk_index=chunk.index,
+                            embedding=doc_embeddings[j],
+                            token_count=chunk.token_count,
+                            metadata_=chunk.metadata,
+                        )
+                        session.add(db_chunk)
+
+                    await session.commit()
+
+                emb_offset += len(chunks)
+                results["extracted"] += 1
+                results["chunked"] += len(chunks)
+                results["embedded"] += sum(
+                    1 for e in doc_embeddings if e is not None
+                )
+                total_processed[0] += 1
+                committed += 1
+
+            except Exception as e:
+                emb_offset += len(chunks)
+                results["errors"] += 1
+                logger.exception("Failed to commit %s", doc.title)
+
+        del all_texts, all_embeddings
+        return committed
+
+    # ------------------------------------------------------------------
+    # Calibre: pipelined extraction + embedding
     # ------------------------------------------------------------------
 
     async def _process_calibre(self, reindex: bool) -> dict:
-        from sqlalchemy import select
-
         try:
             bridge = CalibreBridge(self.config.calibre.library_path)
         except FileNotFoundError as e:
@@ -94,7 +230,7 @@ class IngestionPipeline:
         console.print(f"\n[bold]Calibre: {len(books)} books found[/bold]")
 
         results = {"extracted": 0, "chunked": 0, "embedded": 0, "errors": 0}
-        total_processed = 0
+        total_processed = [0]  # mutable counter for closure
 
         with Progress(
             SpinnerColumn(),
@@ -107,128 +243,51 @@ class IngestionPipeline:
         ) as progress:
             task = progress.add_task("Processing", total=len(books))
 
-            # Process in batches of BOOKS_PER_BATCH
-            for batch_start in range(0, len(books), BOOKS_PER_BATCH):
-                batch_end = min(batch_start + BOOKS_PER_BATCH, len(books))
-                batch_books = books[batch_start:batch_end]
+            # Split books into batches
+            batches = []
+            for i in range(0, len(books), BOOKS_PER_BATCH):
+                batches.append(books[i:i + BOOKS_PER_BATCH])
 
-                # Phase A: Extract and chunk this batch
-                batch_data = []  # list of (doc, chunks) tuples
-                for book in batch_books:
-                    try:
-                        doc = bridge.extract_book(book)
-                        if doc is None:
-                            continue
+            # Pipeline: extract batch[N+1] in executor while embedding batch[N]
+            loop = asyncio.get_event_loop()
+            pending_extraction = None
 
-                        # Dedup check
-                        if not reindex:
-                            async with session_context() as check_session:
-                                exists = await check_session.execute(
-                                    select(Document).where(
-                                        Document.content_hash == doc.content_hash
-                                    )
-                                )
-                                if exists.scalar_one_or_none():
-                                    continue
+            for batch_idx, batch_books in enumerate(batches):
+                batch_end = min((batch_idx + 1) * BOOKS_PER_BATCH, len(books))
 
-                        chunks = chunk_text(
-                            doc.content,
-                            strategy=self.config.chunking.strategy,
-                            max_tokens=self.config.chunking.max_tokens,
-                            overlap_tokens=self.config.chunking.overlap_tokens,
-                            respect_headings=self.config.chunking.respect_headings,
-                        )
+                # If we have a pending extraction from previous iteration, await it
+                if pending_extraction is not None:
+                    batch_data = await pending_extraction
+                else:
+                    # First batch: extract synchronously
+                    batch_data = await loop.run_in_executor(
+                        None, self._extract_batch, batch_books, bridge, reindex
+                    )
 
-                        if chunks:
-                            # Free the large original text immediately
-                            doc.content = ""
-                            batch_data.append((doc, chunks))
+                # Kick off extraction of NEXT batch in background (if exists)
+                if batch_idx + 1 < len(batches):
+                    next_books = batches[batch_idx + 1]
+                    pending_extraction = loop.run_in_executor(
+                        None, self._extract_batch, next_books, bridge, reindex
+                    )
+                else:
+                    pending_extraction = None
 
-                    except Exception as e:
-                        results["errors"] += 1
-                        logger.exception("Failed to extract %s", book.get("title", "?"))
-
-                if not batch_data:
-                    progress.update(task, advance=len(batch_books))
-                    continue
-
-                # Phase B: Batch embed all chunks from this batch together
-                all_texts = []
-                for _, chunks in batch_data:
-                    all_texts.extend(c.content for c in chunks)
-
-                try:
-                    all_embeddings = []
-                    embed_batch_size = self.config.embedding.batch_size
-                    for start in range(0, len(all_texts), embed_batch_size):
-                        end = min(start + embed_batch_size, len(all_texts))
-                        batch_embs = await self.embedding_service.embed_batch(
-                            all_texts[start:end]
-                        )
-                        all_embeddings.extend(batch_embs)
-                except Exception as e:
-                    results["errors"] += len(batch_data)
-                    logger.exception("Embedding failed for batch starting at %d", batch_start)
-                    progress.update(task, advance=len(batch_books))
-                    continue
-
-                # Phase C: Commit each document individually
-                emb_offset = 0
-                for doc, chunks in batch_data:
-                    try:
-                        doc_embeddings = all_embeddings[emb_offset:emb_offset + len(chunks)]
-                        emb_offset += len(chunks)
-
-                        async with session_context() as session:
-                            db_doc = Document(
-                                title=doc.title,
-                                author=doc.author,
-                                source=doc.source,
-                                file_path=doc.file_path,
-                                calibre_id=doc.metadata.get("calibre_id"),
-                                content_hash=doc.content_hash,
-                                description=doc.metadata.get("description"),
-                                tags=doc.metadata.get("tags", []),
-                                metadata_=doc.metadata,
-                            )
-                            session.add(db_doc)
-                            await session.flush()
-
-                            for j, chunk in enumerate(chunks):
-                                db_chunk = Chunk(
-                                    document_id=db_doc.id,
-                                    content=chunk.content,
-                                    chunk_index=chunk.index,
-                                    embedding=doc_embeddings[j],
-                                    token_count=chunk.token_count,
-                                    metadata_=chunk.metadata,
-                                )
-                                session.add(db_chunk)
-
-                            await session.commit()
-
-                        results["extracted"] += 1
-                        results["chunked"] += len(chunks)
-                        results["embedded"] += sum(
-                            1 for e in doc_embeddings if e is not None
-                        )
-                        total_processed += 1
-
-                    except Exception as e:
-                        results["errors"] += 1
-                        logger.exception("Failed to commit %s", doc.title)
+                # Embed and commit current batch
+                if batch_data:
+                    await self._embed_and_commit_batch(
+                        batch_data, results, total_processed
+                    )
+                    del batch_data
+                    gc.collect()
 
                 progress.update(task, advance=len(batch_books))
 
-                if total_processed > 0 and (total_processed % 20 == 0 or batch_end >= len(books)):
+                if total_processed[0] > 0 and (total_processed[0] % 20 == 0 or batch_end >= len(books)):
                     console.print(
                         f"  [green]✓[/green] {batch_end}/{len(books)} books processed "
                         f"({results['chunked']} chunks total)"
                     )
-
-                # Free batch memory
-                del batch_data, all_texts, all_embeddings
-                gc.collect()
 
         console.print(
             f"\n[bold green]Done:[/bold green] {results['extracted']} docs, "
@@ -300,66 +359,10 @@ class IngestionPipeline:
                         results["errors"] += 1
 
                 if batch_data:
-                    all_texts = []
-                    for _, chunks in batch_data:
-                        all_texts.extend(c.content for c in chunks)
-
-                    try:
-                        all_embeddings = []
-                        embed_batch_size = self.config.embedding.batch_size
-                        for start in range(0, len(all_texts), embed_batch_size):
-                            end = min(start + embed_batch_size, len(all_texts))
-                            batch_embs = await self.embedding_service.embed_batch(
-                                all_texts[start:end]
-                            )
-                            all_embeddings.extend(batch_embs)
-                    except Exception as e:
-                        results["errors"] += len(batch_data)
-                        progress.update(task, advance=len(batch_paths))
-                        continue
-
-                    emb_offset = 0
-                    for doc, chunks in batch_data:
-                        try:
-                            doc_embeddings = all_embeddings[emb_offset:emb_offset + len(chunks)]
-                            emb_offset += len(chunks)
-
-                            async with session_context() as session:
-                                db_doc = Document(
-                                    title=doc.title,
-                                    author=doc.author,
-                                    source=doc.source,
-                                    file_path=doc.file_path,
-                                    content_hash=doc.content_hash,
-                                    tags=doc.metadata.get("tags", []),
-                                    metadata_=doc.metadata,
-                                )
-                                session.add(db_doc)
-                                await session.flush()
-
-                                for j, chunk in enumerate(chunks):
-                                    db_chunk = Chunk(
-                                        document_id=db_doc.id,
-                                        content=chunk.content,
-                                        chunk_index=chunk.index,
-                                        embedding=doc_embeddings[j],
-                                        token_count=chunk.token_count,
-                                        metadata_=chunk.metadata,
-                                    )
-                                    session.add(db_chunk)
-
-                                await session.commit()
-
-                            results["extracted"] += 1
-                            results["chunked"] += len(chunks)
-                            results["embedded"] += sum(
-                                1 for e in doc_embeddings if e is not None
-                            )
-
-                        except Exception as e:
-                            results["errors"] += 1
-
-                    del batch_data, all_texts, all_embeddings
+                    await self._embed_and_commit_batch(
+                        batch_data, results, [0]
+                    )
+                    del batch_data
                     gc.collect()
 
                 progress.update(task, advance=len(batch_paths))
