@@ -305,6 +305,9 @@ default_mode = "hybrid"
 hybrid_weight_vector = 0.7
 hybrid_weight_fts = 0.3
 default_limit = 10
+# Vector-match quality floor (cosine). Calibrated for nomic-embed-text-v1.5
+# with task prefixes; re-calibrate if you change the embedding model.
+min_similarity = 0.72
 
 [api]
 host = "0.0.0.0"

@@ -35,6 +35,11 @@ default_mode = "hybrid"
 hybrid_weight_vector = 0.7
 hybrid_weight_fts = 0.3
 default_limit = 10
+# Quality floor for vector matches (cosine 0-1). Calibrated for
+# nomic-embed-text-v1.5 WITH task prefixes: in-domain floor 0.720,
+# out-of-domain peak 0.718. Lower to ~0.70 to favor recall, raise to
+# ~0.75 to favor precision. 0.0 disables the gate.
+min_similarity = 0.72
 
 [api]
 # 127.0.0.1 = local-only access (no LAN exposure). Use 0.0.0.0 to allow

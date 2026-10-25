@@ -160,7 +160,37 @@ class SearchEngine:
             return SearchResults(results=[], total=0, mode="context", query=query)
 
         fused = fuse(ranked_lists, weights=weights)[:limit]
+
+        # Post-fusion quality gate: semantic/hybrid legs are already gated by
+        # min_similarity, but keyword-leg hits enter without vector evidence.
+        # Since context() is the grounding tool for agents, require every hit
+        # to clear the same similarity bar — keyword-only matches for topics
+        # absent from the KB ("welding") must not sneak through.
+        fused = await self._gate_by_similarity(query, fused)
+
         return SearchResults(results=fused, total=len(fused), mode="context", query=query)
+
+    async def _gate_by_similarity(
+        self, query: str, results: list[SearchResult]
+    ) -> list[SearchResult]:
+        """Filter results whose chunk embedding is below min_similarity.
+
+        Keyword-only results carry no similarity score; this fetches their
+        embeddings in one query and computes cosine against the query.
+        """
+        if not results:
+            return results
+        q_emb = await self.embedding_service.embed_query(query)
+        async with session_context() as session:
+            rows = (await session.execute(
+                sql_text(
+                    "SELECT id::text, 1 - (embedding <=> CAST(:e AS vector)) AS sim "
+                    "FROM chunks WHERE id = ANY(CAST(:ids AS uuid[]))"
+                ),
+                {"e": str(q_emb), "ids": [r.chunk_id for r in results]},
+            )).fetchall()
+        sims = {r[0]: float(r[1]) for r in rows}
+        return [r for r in results if sims.get(r.chunk_id, 0.0) >= self.search_config.min_similarity]
 
     async def _semantic_search(
         self,
