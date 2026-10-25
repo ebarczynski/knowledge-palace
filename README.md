@@ -124,6 +124,24 @@ kp search "async error handling" --mode semantic
 kp search "tokio::spawn" --mode keyword
 ```
 
+**Retrieval quality.** Embeddings use nomic task prefixes (`search_query:` /
+`search_document:` — required for nomic-embed models), and vector results are
+gated by `[search].min_similarity` (default `0.72`). Queries about topics
+absent from the library ("cooking", "welding") return **zero** results in
+semantic mode instead of weakly-related junk; hybrid mode additionally allows
+literal keyword matches (real term occurrences). If you change the embedding
+model, re-calibrate: measure top-1 similarity for ~10 realistic in-domain
+queries and for out-of-domain probes, and set the threshold between the two
+distributions.
+
+If you change embedding-affecting settings (model, prefixes), re-embed:
+
+```bash
+kp reindex-embeddings                 # backs up DB first (pg_dump to /tmp)
+kp reindex-embeddings --skip-backup --start-after 67840   # resume an interrupted run
+kp reindex-embeddings --provider pytorch --batch 32       # GPU path (MPS/CUDA), low memory
+```
+
 ### 7. Serve
 
 ```bash

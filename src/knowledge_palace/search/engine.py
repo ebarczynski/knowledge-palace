@@ -194,6 +194,7 @@ class SearchEngine:
                 FROM chunks c
                 JOIN documents d ON c.document_id = d.id
                 WHERE c.embedding IS NOT NULL
+                  AND 1 - (c.embedding <=> :embedding) >= :min_sim
                 {filter_clauses}
                 ORDER BY c.embedding <=> :embedding
                 LIMIT :limit
@@ -201,7 +202,8 @@ class SearchEngine:
 
             result = await session.execute(
                 sql,
-                {"embedding": str(query_embedding), "limit": limit, **filter_params},
+                {"embedding": str(query_embedding), "limit": limit,
+                 "min_sim": self.search_config.min_similarity, **filter_params},
             )
             rows = result.fetchall()
 
@@ -323,6 +325,7 @@ class SearchEngine:
                     FROM chunks c
                     JOIN documents d ON c.document_id = d.id
                     WHERE c.embedding IS NOT NULL
+                      AND 1 - (c.embedding <=> :embedding) >= :min_sim
                     {filter_clauses}
                     ORDER BY distance
                     LIMIT 50
@@ -392,6 +395,7 @@ class SearchEngine:
                     "embedding": str(query_embedding),
                     "query": query,
                     "limit": limit,
+                    "min_sim": self.search_config.min_similarity,
                     "weight_vector": self.search_config.hybrid_weight_vector,
                     "weight_fts": self.search_config.hybrid_weight_fts,
                     **filter_params,

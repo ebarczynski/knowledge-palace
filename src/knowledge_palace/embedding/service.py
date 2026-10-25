@@ -30,6 +30,19 @@ if TYPE_CHECKING:
 # in the terminal for CLI/serve use.
 console = Console(stderr=True)
 
+# Nomic embed models are instruction-tuned: queries and documents MUST carry
+# task prefixes or retrieval quality degrades sharply (all texts land in the
+# same "document" mode, compressing the similarity space so unrelated queries
+# score ~0.65+ against everything). Other model families must NOT be prefixed.
+_TASK_PREFIX_MODELS = ("nomic-embed", "nomic-embed-text")
+_QUERY_PREFIX = "search_query: "
+_DOC_PREFIX = "search_document: "
+
+
+def _wants_task_prefixes(model_name: str) -> bool:
+    lowered = model_name.lower()
+    return any(marker in lowered for marker in _TASK_PREFIX_MODELS)
+
 
 class EmbeddingService:
     """Generates embeddings using the fastest available backend."""
@@ -38,6 +51,7 @@ class EmbeddingService:
         self.config = config
         self._model = None
         self._backend = None  # "mlx", "onnx", "pytorch"
+        self._use_prefixes = _wants_task_prefixes(config.model)
 
     # ------------------------------------------------------------------
     # Backend selection
@@ -96,7 +110,7 @@ class EmbeddingService:
             device=self.config.device,
             trust_remote_code=True,
             backend="onnx",
-            model_kwargs={"provider": "CPUExecutionProvider"},
+            model_kwargs={"provider": "CPUExecutionProvider", "file_name": "onnx/model.onnx"},
         )
         return model
 
@@ -113,8 +127,25 @@ class EmbeddingService:
         return model
 
     def _load_model(self):
-        """Lazy-load the model with the fastest available backend."""
+        """Lazy-load the model with the fastest available backend.
+
+        Honors ``provider`` from config: "onnx"/"pytorch" force that backend
+        (useful when e.g. ONNX's CPU thread pool eats RAM on long sequences);
+        "auto" keeps the MLX → ONNX → PyTorch preference ladder.
+        """
         if self._model is not None:
+            return self._model
+
+        if self.config.provider == "pytorch":
+            self._model = self._load_pytorch()
+            self._backend = "pytorch"
+            console.print("[green]Model loaded (PyTorch backend - forced by provider)[/green]")
+            return self._model
+
+        if self.config.provider == "onnx":
+            self._model = self._load_onnx()
+            self._backend = "onnx"
+            console.print("[green]Model loaded (ONNX backend - forced by provider)[/green]")
             return self._model
 
         # MLX: only attempt when the model architecture is actually supported
@@ -154,7 +185,11 @@ class EmbeddingService:
         return embeddings[0]
 
     async def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
-        """Generate embeddings for a batch of texts."""
+        """Generate embeddings for a batch of *documents* (indexed content).
+
+        For nomic models the ``search_document: `` task prefix is applied per
+        text — required for the model's retrieval mode to work correctly.
+        """
         if not texts:
             return []
 
@@ -166,6 +201,9 @@ class EmbeddingService:
 
         if not non_empty_texts:
             return [None] * len(texts)
+
+        if self._use_prefixes:
+            non_empty_texts = [_DOC_PREFIX + t for t in non_empty_texts]
 
         # Run embedding in thread pool (CPU/Metal-bound)
         loop = asyncio.get_event_loop()
@@ -217,8 +255,23 @@ class EmbeddingService:
         )
 
     async def embed_query(self, text: str) -> list[float]:
-        """Generate embedding for a search query (guaranteed non-None)."""
-        result = await self.embed(text)
-        if result is None:
+        """Generate embedding for a search query (guaranteed non-None).
+
+        Applies the ``search_query: `` task prefix for nomic models so the
+        query lands in the retrieval mode matching the prefixed documents.
+        """
+        if not text.strip():
             raise ValueError("Cannot embed empty query")
-        return result
+        model_bundle = self._load_model()
+
+        prefixed = (_QUERY_PREFIX + text) if self._use_prefixes else text
+        loop = asyncio.get_event_loop()
+        if self._backend == "mlx":
+            embeddings = await loop.run_in_executor(
+                None, self._encode_mlx, model_bundle, [prefixed]
+            )
+        else:
+            embeddings = await loop.run_in_executor(
+                None, self._encode_sentence_transformers, model_bundle, [prefixed]
+            )
+        return embeddings[0].astype(np.float16).tolist()

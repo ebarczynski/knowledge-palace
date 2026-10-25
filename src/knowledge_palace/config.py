@@ -63,6 +63,14 @@ class SearchConfig:
     hybrid_weight_vector: float = 0.7
     hybrid_weight_fts: float = 0.3
     default_limit: int = 10
+    # Quality floor for vector matches (cosine similarity, 0-1). Results below
+    # this are dropped from semantic search and from the vector leg of hybrid
+    # search, so queries about topics absent from the KB ("cooking", "welding")
+    # return nothing instead of weakly-related junk. 0.0 disables the floor.
+    # Calibrated for nomic-embed-text-v1.5 WITH task prefixes: measured in-domain
+    # floor across realistic SE queries is 0.720; out-of-domain queries peak at
+    # 0.718 (only "cooking", which lexically overlaps recipe-teaching examples).
+    min_similarity: float = 0.72
 
 
 @dataclass
