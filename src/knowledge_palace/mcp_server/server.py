@@ -95,9 +95,9 @@ TOOLS = [
             "Gather broad, de-duplicated context for a task in one call. Expands the "
             "query into synonym/paraphrase variants, runs each across keyword + "
             "semantic + hybrid search, and fuses results via Reciprocal Rank Fusion. "
-            "Use this when you need comprehensive grounded context for implementing "
-            "or reasoning about a topic (e.g. a whole pipeline), rather than a quick "
-            "lookup. Each result includes provenance (source file, chunk index, format)."
+            "Returns structured JSON: {query, total, results: [{text, title, author, "
+            "source, score, provenance?}...]} — built for programmatic grounding "
+            "(decision engines, RAG pipelines), not for prose answers."
         ),
         inputSchema={
             "type": "object",
@@ -215,6 +215,10 @@ async def run_mcp_server(config: Config) -> None:
 
         elif name == "context":
             # Multi-query retrieval: expand variants, run across modes, RRF-fuse.
+            # Output is always structured JSON (schema-verifiable grounding input
+            # for decision engines / RAG pipelines) — never prose. Consumers:
+            # {query, total, mode, results: [{text, title, author, source,
+            # score, tags?, provenance?}, ...]}.
             results = await search_engine.retrieve_context(
                 query=arguments["query"],
                 limit=arguments.get("limit", 10),
@@ -222,13 +226,29 @@ async def run_mcp_server(config: Config) -> None:
                 source_filter=arguments.get("source"),
                 author=arguments.get("author"),
             )
-            if not results.results:
-                return [TextContent(type="text", text="No relevant context found in your knowledge base.")]
-            header = (
-                f"Gathered {results.total} fused context passages "
-                f"(multi-query retrieval across keyword/semantic/hybrid):\n"
-            )
-            return [TextContent(type="text", text=header + format_results(results, show_provenance=True))]
+            hits = []
+            for r in results.results:
+                hit = {
+                    "text": r.content,
+                    "title": r.title,
+                    "source": r.source,
+                    "score": round(r.score, 4),
+                }
+                if r.author:
+                    hit["author"] = r.author
+                if r.tags:
+                    hit["tags"] = r.tags
+                prov = getattr(r, "provenance", None)
+                if prov:
+                    hit["provenance"] = prov
+                hits.append(hit)
+            payload = {
+                "query": results.query,
+                "total": results.total,
+                "mode": results.mode,
+                "results": hits,
+            }
+            return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
 
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
