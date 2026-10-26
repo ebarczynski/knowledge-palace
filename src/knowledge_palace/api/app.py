@@ -28,6 +28,11 @@ _config: Config | None = None
 _search_engine: SearchEngine | None = None
 
 
+def _clean_tags(tags) -> list[str]:
+    """Drop non-string entries (Calibre exports can contain JSON nulls in tags)."""
+    return [t for t in (tags or []) if isinstance(t, str)]
+
+
 def get_search_engine() -> SearchEngine:
     if _search_engine is None:
         raise RuntimeError("Search engine not initialized")
@@ -221,7 +226,7 @@ def create_app(config: Config) -> FastAPI:
                         title=doc.title,
                         author=doc.author,
                         source=doc.source,
-                        tags=doc.tags or [],
+                        tags=_clean_tags(doc.tags),
                         created_at=doc.created_at.isoformat(),
                     )
                     for doc in docs
@@ -247,7 +252,7 @@ def create_app(config: Config) -> FastAPI:
                 source=doc.source,
                 file_path=doc.file_path,
                 description=doc.description,
-                tags=doc.tags or [],
+                tags=_clean_tags(doc.tags),
                 metadata=doc.metadata_ or {},
                 created_at=doc.created_at.isoformat(),
             )

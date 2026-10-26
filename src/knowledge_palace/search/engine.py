@@ -29,6 +29,11 @@ class SearchResult:
     provenance: dict = None  # populated from DB columns (chunk_index, file_path, ...)
 
 
+def _clean_tags(tags) -> list:
+    """Drop non-string entries (Calibre exports can contain JSON nulls in tags)."""
+    return [t for t in (tags or []) if isinstance(t, str)]
+
+
 def _build_provenance(row, doc_metadata: dict) -> dict:
     """Assemble a provenance dict from a result row + document metadata.
 
@@ -246,7 +251,7 @@ class SearchEngine:
                     title=row.title,
                     author=row.author,
                     source=row.source,
-                    tags=row.tags or [],
+                    tags=_clean_tags(row.tags),
                     highlights=[],
                     metadata=row.metadata or {},
                     provenance=_build_provenance(row, row.metadata or {}),
@@ -316,7 +321,7 @@ class SearchEngine:
                     title=row.title,
                     author=row.author,
                     source=row.source,
-                    tags=row.tags or [],
+                    tags=_clean_tags(row.tags),
                     highlights=[row.highlights] if row.highlights else [],
                     metadata=row.metadata or {},
                     provenance=_build_provenance(row, row.metadata or {}),
@@ -442,7 +447,7 @@ class SearchEngine:
                     title=row.title,
                     author=row.author,
                     source=row.source,
-                    tags=row.tags or [],
+                    tags=_clean_tags(row.tags),
                     highlights=[row.highlights] if row.highlights else [],
                     metadata=row.metadata or {},
                     provenance=_build_provenance(row, row.metadata or {}),
@@ -504,7 +509,7 @@ class SearchEngine:
                     title=row.title,
                     author=row.author,
                     source=row.source,
-                    tags=row.tags or [],
+                    tags=_clean_tags(row.tags),
                     highlights=[],
                     metadata=row.metadata or {},
                     provenance=_build_provenance(row, row.metadata or {}),
