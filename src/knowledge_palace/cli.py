@@ -260,6 +260,48 @@ def calibre_list(ctx):
     bridge.list_books()
 
 
+@cli.command("eval", context_settings={"ignore_unknown_options": True})
+@click.option("--api", default=None, help="API base URL (default: from config.toml)")
+@click.option("--cases-dir", type=click.Path(exists=True, file_okay=False), default=None,
+              help="Directory with *.jsonl eval cases (default: evals/cases)")
+@click.option("--domains", default=None, help="Comma-separated domain filter (e.g. cpp,rust)")
+@click.option("--modes", default="semantic,hybrid,context", show_default=True)
+@click.option("-k", type=int, default=5, show_default=True, help="Rank cutoff for hit/mrr/recall")
+@click.option("--gate", is_flag=True, help="Exit 1 on quality thresholds or baseline regressions")
+@click.option("--baseline", type=click.Path(exists=True), default=None, help="Baseline JSON to compare against")
+@click.option("--save-baseline", type=click.Path(), default=None, help="Save current metrics as baseline")
+@click.option("--json", "json_out", type=click.Path(), default=None, help="Write metrics JSON here")
+@click.option("--show-misses", is_flag=True, help="List cases with no acceptable source in top-k")
+@click.pass_context
+def eval_cmd(ctx, api, cases_dir, domains, modes, k, gate, baseline, save_baseline, json_out, show_misses):
+    """Score retrieval quality against the eval set (evals/cases).
+
+    Run against a live server (kp serve). Use --gate in CI or after changing
+    embeddings/chunking/search settings to catch quality regressions.
+    """
+    from .evalharness import main as harness_main
+
+    argv = []
+    if api:
+        argv += ["--api", api]
+    if cases_dir:
+        argv += ["--cases-dir", cases_dir]
+    if domains:
+        argv += ["--domains", domains]
+    argv += ["--modes", modes, "--k", str(k)]
+    if gate:
+        argv.append("--gate")
+    if baseline:
+        argv += ["--baseline", baseline]
+    if save_baseline:
+        argv += ["--save-baseline", save_baseline]
+    if json_out:
+        argv += ["--json", json_out]
+    if show_misses:
+        argv.append("--show-misses")
+    ctx.exit(harness_main(argv))
+
+
 @cli.command("init-config")
 @click.argument("path", default="config.toml")
 def init_config(path: str):

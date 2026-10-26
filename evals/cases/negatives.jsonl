@@ -1,0 +1,8 @@
+{"id": "neg-wine-tasting", "domain": "negatives", "query": "What are the best wine tasting regions to visit in France?", "negative": true, "accept": [], "note": "topic absent from KB"}
+{"id": "neg-knitting", "domain": "negatives", "query": "How do I knit a cable stitch sweater pattern?", "negative": true, "accept": [], "note": "topic absent from KB"}
+{"id": "neg-sailing", "domain": "negatives", "query": "What safety equipment do I need for offshore sailing?", "negative": true, "accept": [], "note": "topic absent from KB"}
+{"id": "neg-chess-openings", "domain": "negatives", "query": "What is the best chess opening for beginners against e4?", "negative": true, "accept": [], "note": "topic absent from KB"}
+{"id": "neg-dental", "domain": "negatives", "query": "How often should I get dental cleanings and check for cavities?", "negative": true, "accept": [], "note": "topic absent from KB"}
+{"id": "neg-yoga", "domain": "negatives", "query": "Which yoga poses improve lower back flexibility?", "negative": true, "accept": [], "note": "topic absent from KB"}
+{"id": "neg-rental-property", "domain": "negatives", "query": "How do I evaluate rental property cash flow for real estate investing?", "negative": true, "accept": [], "note": "topic absent from KB"}
+{"id": "neg-f1-pitstop", "domain": "negatives", "query": "How do Formula 1 teams plan their pit stop strategy during a race?", "negative": true, "accept": [], "note": "topic absent from KB"}

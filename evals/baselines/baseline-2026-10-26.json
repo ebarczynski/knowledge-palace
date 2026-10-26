@@ -1,0 +1,142 @@
+{
+  "hit@k": {
+    "semantic": {
+      "architecture": 1.0,
+      "cpp": 0.75,
+      "ml-engineering": 0.75,
+      "mobile": 1.0,
+      "project-management": 1.0,
+      "rust": 0.8333333333333334,
+      "software": 0.75,
+      "overall": 0.8627450980392157
+    },
+    "hybrid": {
+      "architecture": 1.0,
+      "cpp": 0.75,
+      "ml-engineering": 0.75,
+      "mobile": 1.0,
+      "project-management": 1.0,
+      "rust": 0.8333333333333334,
+      "software": 0.75,
+      "overall": 0.8627450980392157
+    },
+    "context": {
+      "architecture": 1.0,
+      "cpp": 0.75,
+      "ml-engineering": 0.625,
+      "mobile": 1.0,
+      "project-management": 1.0,
+      "rust": 0.8333333333333334,
+      "software": 0.75,
+      "overall": 0.8431372549019608
+    }
+  },
+  "mrr@k": {
+    "semantic": {
+      "architecture": 0.7125,
+      "cpp": 0.65,
+      "ml-engineering": 0.4625,
+      "mobile": 0.9166666666666666,
+      "project-management": 0.9047619047619048,
+      "rust": 0.8333333333333334,
+      "software": 0.5104166666666666,
+      "overall": 0.6964052287581699
+    },
+    "hybrid": {
+      "architecture": 0.65,
+      "cpp": 0.65,
+      "ml-engineering": 0.4625,
+      "mobile": 0.9166666666666666,
+      "project-management": 0.9047619047619048,
+      "rust": 0.8333333333333334,
+      "software": 0.4479166666666667,
+      "overall": 0.676797385620915
+    },
+    "context": {
+      "architecture": 0.65,
+      "cpp": 0.65,
+      "ml-engineering": 0.43125,
+      "mobile": 0.9166666666666666,
+      "project-management": 0.9047619047619048,
+      "rust": 0.8333333333333334,
+      "software": 0.4479166666666667,
+      "overall": 0.6718954248366013
+    }
+  },
+  "recall@k": {
+    "semantic": {
+      "architecture": 0.7416666666666667,
+      "cpp": 0.6875,
+      "ml-engineering": 0.625,
+      "mobile": 1.0,
+      "project-management": 0.9285714285714286,
+      "rust": 0.8333333333333334,
+      "software": 0.625,
+      "overall": 0.7633986928104575
+    },
+    "hybrid": {
+      "architecture": 0.7833333333333333,
+      "cpp": 0.6458333333333334,
+      "ml-engineering": 0.5625,
+      "mobile": 0.9166666666666666,
+      "project-management": 0.8571428571428571,
+      "rust": 0.8333333333333334,
+      "software": 0.625,
+      "overall": 0.7339869281045751
+    },
+    "context": {
+      "architecture": 0.7166666666666667,
+      "cpp": 0.6458333333333334,
+      "ml-engineering": 0.4583333333333333,
+      "mobile": 1.0,
+      "project-management": 0.8571428571428571,
+      "rust": 0.8333333333333334,
+      "software": 0.625,
+      "overall": 0.7169934640522877
+    }
+  },
+  "latency_p50_ms": {
+    "semantic": {
+      "overall": 24.752708995947614
+    },
+    "hybrid": {
+      "overall": 24.86224999302067
+    },
+    "context": {
+      "overall": 69.27500001620501
+    }
+  },
+  "negative_fp": {
+    "semantic": {
+      "overall": 0.0
+    },
+    "hybrid": {
+      "overall": 0.0
+    },
+    "context": {
+      "overall": 0.0
+    }
+  },
+  "negative_top_score_max": {
+    "semantic": {
+      "overall": null
+    },
+    "hybrid": {
+      "overall": null
+    },
+    "context": {
+      "overall": null
+    }
+  },
+  "domains": [
+    "architecture",
+    "cpp",
+    "ml-engineering",
+    "mobile",
+    "project-management",
+    "rust",
+    "software"
+  ],
+  "n_cases": 59,
+  "k": 5
+}

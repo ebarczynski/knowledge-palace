@@ -1,0 +1,6 @@
+{"id": "rust-async-scheduling", "domain": "rust", "query": "How does async task scheduling work in Rust with executors?", "accept": ["Asynchronous Programming in Rust"], "note": "validated: async rust surfaces"}
+{"id": "rust-web-api", "domain": "rust", "query": "How do I structure a REST API service in Rust with proper error handling?", "accept": ["Rust Web Programming"], "note": "web services"}
+{"id": "rust-speedup-python", "domain": "rust", "query": "When should I rewrite a slow Python module in Rust and how do I bind it?", "accept": ["Speed Up Your Python with Rust"], "note": "polyglot optimization"}
+{"id": "rust-cli-args", "domain": "rust", "query": "How do I parse command line arguments and build a CLI tool in Rust?", "accept": ["Command-Line Rust"], "note": "CLI tooling"}
+{"id": "rust-lifetimes", "domain": "rust", "query": "How do lifetimes prevent dangling references in Rust?", "accept": ["Command-Line Rust", "Asynchronous Programming in Rust", "Rust Web Programming", "Speed Up Your Python with Rust"], "note": "ownership/borrowing"}
+{"id": "rust-async-shared-state", "domain": "rust", "query": "How do I share mutable state between async tasks safely in Rust?", "accept": ["Asynchronous Programming in Rust", "Rust Web Programming"], "note": "async concurrency"}

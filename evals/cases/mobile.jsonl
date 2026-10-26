@@ -1,0 +1,6 @@
+{"id": "mob-swiftui-state", "domain": "mobile", "query": "What are the state management patterns in SwiftUI?", "accept": ["iOS Developer", "Mastering Swift 6", "Swift Cookbook"], "note": "validated: SwiftUI book surfaces"}
+{"id": "mob-android-layered", "domain": "mobile", "query": "How do I structure an Android app with a layered clean architecture?", "accept": ["Clean Android Architecture", "Programming Android With Kotlin"], "note": "android architecture"}
+{"id": "mob-kotlin-coroutines", "domain": "mobile", "query": "What are Kotlin coroutine best practices for background work on Android?", "accept": ["Kotlin Design Patterns and Best Practices", "Programming Android With Kotlin"], "note": "kotlin concurrency"}
+{"id": "mob-swift6-concurrency", "domain": "mobile", "query": "How do I adopt Swift 6 strict concurrency checking in an existing app?", "accept": ["Mastering Swift 6", "Swift Cookbook", "iOS Developer"], "note": "ios modern concurrency"}
+{"id": "mob-ondevice-ml", "domain": "mobile", "query": "How do I run machine learning inference on-device in a mobile app?", "accept": ["Machine Learning for Mobile"], "note": "mobile ML"}
+{"id": "mob-swiftui-navigation", "domain": "mobile", "query": "How should I structure navigation between screens in a SwiftUI app?", "accept": ["iOS Developer", "Swift Cookbook"], "note": "ios navigation"}

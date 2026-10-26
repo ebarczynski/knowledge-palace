@@ -207,6 +207,65 @@ multi-query fusion, the others take a `mode` (HYBRID/KEYWORD/SEMANTIC).
 - `similar(text, threshold?, limit?)` — Find similar content
 - `ask(question, limit?)` — Ask a question, returns relevant passages (RAG-style)
 
+## Retrieval Quality Eval
+
+`evals/` contains a domain-spanning eval set (general software, C++, Rust,
+mobile, ML engineering, project management, architecture & design, plus
+negative probes) and a scoring harness that turns it into a regression gate:
+
+```bash
+kp serve &                        # eval runs against the live API
+kp eval --gate --show-misses      # hit@5 / MRR per domain × mode, negative FP, latency
+kp eval --save-baseline evals/baselines/baseline-<date>.json
+kp eval --gate --baseline evals/baselines/baseline-2026-10-26.json   # CI-style gate
+```
+
+Run it after changing chunking, embedding models, task prefixes,
+`min_similarity`, hybrid weights, or fusion — it fails loudly when hit rates
+drop or negative probes start leaking. See `evals/README.md` for the metrics,
+current baseline, and how to add cases.
+
+## Using Knowledge Palace from ZCode / coding agents
+
+The MCP server is the intended integration surface. Register it once (user
+scope, so every workspace gets it):
+
+```json
+{
+  "mcpServers": {
+    "knowledge-palace": {
+      "command": "/path/to/knowledge-palace/.venv/bin/kp",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Then, when starting a project or task in ZCode:
+
+1. **Kickoff / architecture**: before writing a design, ask
+   `context("how to structure <domain> system with <constraints>")` — the
+   multi-query fusion endpoint returns broad, de-duplicated, ranked passages
+   with provenance in one call. Prefer it over many `search` calls.
+2. **Implementation**: use `search` (hybrid) for targeted lookups
+   (`"C++ coroutine awaitable pattern"`) and `ask` for RAG-style question
+   answering with passages.
+3. **Cite and verify**: every result carries provenance (`title`, `author`,
+   `chunk_index`, `file_path`) — cite it in your answer and read the source
+   chunk when the stakes are high.
+4. **Trust the empty result**: when `search`/`context` return nothing for a
+   topic, the library does not cover it (the similarity gate suppresses weak
+   matches). Fall back to your own knowledge or the web — do not invent
+   citations.
+5. **Maintain quality**: after ingesting new books or touching retrieval
+   settings, run `kp eval --gate`. If hit rates regress, the eval's
+   `--show-misses` output says exactly which queries broke.
+
+A ready-made agent skill encapsulating this workflow is versioned at
+`.zcode/skills/knowledge-palace/SKILL.md` (source of truth) — copy it to
+`~/.agents/skills/knowledge-palace/SKILL.md` to activate it in every
+workspace.
+
 ## Architecture
 
 ```
@@ -301,7 +360,9 @@ the first existing path: `./config.toml`,
 - **`context` query expansion is rule-based.** Synonyms cover common SE/ML terms
   (LoRA, finetuning, microservices, async, …); queries with no mapped terms fall
   back to mode-only fusion (still broadens recall via keyword+semantic+hybrid).
-- **No tests** are currently included.
+- **No unit tests** are currently included; retrieval quality is covered by the
+  `evals/` harness (`kp eval --gate`) instead — it catches ranking, gating, and
+  embedding regressions end to end against the live stack.
 
 ## Project layout
 
@@ -316,6 +377,15 @@ src/knowledge_palace/
 ├── ingest/               # Calibre bridge, file crawler, extractors, chunker, pipeline
 ├── retrieval/            # query expansion + RRF fusion (powers `context`)
 ├── search/               # Hybrid search engine (vector + FTS + RRF) + retrieve_context
+├── evalharness.py        # Retrieval-quality eval runner (powers `kp eval`)
 └── migrations/           # SQL migration files
+
+```
+evals/
+├── cases/                # Eval cases per domain (*.jsonl) + negative probes
+├── baselines/            # Saved metric baselines for regression gating
+├── run_eval.py           # Standalone entry point (kp eval preferred)
+└── README.md             # Metrics, gate thresholds, current baseline
+```
 ```
 ```

@@ -10,4 +10,5 @@ wheels/
 .venv
 
 # ZCode CLI session artifacts
-.zcode/
+.zcode/*
+!.zcode/skills/
