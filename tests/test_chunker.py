@@ -72,10 +72,11 @@ def test_valid_window_still_works_in_a_subprocess():
 
 
 def test_guard_also_covers_the_semantic_strategy():
-    with pytest.raises(ValueError, match="overlap_tokens"):
-        chunk_semantic(ASCII, max_tokens=512, overlap_tokens=512)
-    with pytest.raises(ValueError, match="overlap_tokens"):
-        chunk_text(ASCII, strategy="semantic", max_tokens=512, overlap_tokens=512)
+    # Also through the subprocess helper: at the audited revision the semantic
+    # path hit the same infinite loop, and an in-process call would hang the suite.
+    outcome, detail = _chunk_in_subprocess(ASCII, 512, 512)
+    assert outcome == "error", f"chunk_semantic(512, 512) {outcome}: {detail}"
+    assert "overlap_tokens" in detail
 
 
 def test_unknown_strategy_is_rejected():
