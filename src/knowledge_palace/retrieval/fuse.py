@@ -4,15 +4,16 @@ Complements the in-SQL RRF in ``search.engine.SearchEngine._hybrid_search``
 (which fuses keyword + semantic results for a *single* query): this fuses
 across *multiple* queries (multi-query retrieval) and deduplicates by chunk id.
 
-Uses the same ``k = 60`` smoothing constant as the SQL implementation for
-consistency. Results from lists with higher weights contribute more to the
-fused score (useful if, e.g., a user query should outweigh an auto-expanded
-variant).
+Uses the same ``k = 60`` smoothing constant and 1-based ranks as the SQL
+implementation, so a chunk ranked first in one list scores the same in both.
+Results from lists with higher weights contribute more to the fused score
+(useful if, e.g., a user query should outweigh an auto-expanded variant).
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Sequence
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..search.engine import SearchResult
@@ -22,15 +23,15 @@ RRF_K = 60
 
 
 def fuse(
-    ranked_lists: Sequence[Sequence["SearchResult"]],
+    ranked_lists: Sequence[Sequence[SearchResult]],
     weights: Sequence[float] | None = None,
-) -> list["SearchResult"]:
+) -> list[SearchResult]:
     """Fuse multiple ranked result lists into one via Reciprocal Rank Fusion.
 
     Args:
         ranked_lists: each inner list is a *ranked* (best-first) list of
-            ``SearchResult``. Ranking position is what matters; scores are
-            ignored in favor of RRF's ``1 / (k + rank)`` weighting.
+            ``SearchResult``. Ranking position (1-based) is what matters;
+            scores are ignored in favor of RRF's ``1 / (k + rank)`` weighting.
         weights: optional per-list weights (same length as ``ranked_lists``).
             Defaults to equal weight (1.0) for every list.
 
@@ -52,14 +53,15 @@ def fuse(
 
     scores: dict[str, float] = {}
     # best copy per chunk_id, tracked by content length (richest wins)
-    best: dict[str, "SearchResult"] = {}
+    best: dict[str, SearchResult] = {}
 
-    for weight, results in zip(weights, ranked_lists):
+    for weight, results in zip(weights, ranked_lists, strict=True):
         if weight == 0 or not results:
             continue
-        for rank, r in enumerate(results):
+        # RRF counts ranks from 1 (the top result contributes weight / (k + 1)),
+        # the same convention as the ROW_NUMBER() ranks in the hybrid SQL.
+        for rank, r in enumerate(results, start=1):
             key = r.chunk_id
-            # rank 0 is the top result -> highest contribution
             contribution = weight / (RRF_K + rank)
             scores[key] = scores.get(key, 0.0) + contribution
             existing = best.get(key)

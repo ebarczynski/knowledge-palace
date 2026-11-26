@@ -90,18 +90,18 @@ def _detect_terms(query: str) -> list[tuple[str, list[str]]]:
 def expand_queries(query: str, max_variants: int = 6) -> list[str]:
     """Expand a query into textual variants for multi-query retrieval.
 
-    Always returns at least the original query. When key terms are detected,
-    returns the original plus one rewritten variant per detected synonym group
-    (the matched term replaced by its first synonym). ``max_variants`` caps the
-    total to keep retrieval cost bounded.
+    Always returns at least the original query (and nothing for a blank one).
+    When key terms are detected, returns the original plus one rewritten
+    variant per detected synonym group (the matched term replaced by its first
+    synonym). ``max_variants`` caps the total, the original included.
 
     Example::
 
-        >>> expand_queries("LoRA finetuning for LLMs")
-        ['LoRA finetuning for LLMs',
-         'low-rank adaptation finetuning for LLMs',
-         'LoRA fine-tuning for LLMs',
-         'LoRA finetuning for large language models']
+        >>> expand_queries("LoRA finetuning for LLMs")  # doctest: +NORMALIZE_WHITESPACE
+        ['LoRA finetuning for LLMs', 'low-rank adaptation finetuning for LLMs', 'LoRA fine-tuning for LLMs']
+
+    "LLMs" does not expand because the map matches whole terms only; a singular
+    "LLM" would.
     """
     query = query.strip()
     if not query:
