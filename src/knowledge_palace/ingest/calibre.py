@@ -2,30 +2,67 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
-from typing import Generator
 
 from rich.console import Console
 from rich.table import Table
 
-from .extractors import extract_file, ExtractedDocument
+from .extractors import ExtractedDocument, extract_file
 
 console = Console()
 
+# Preference order when a book has several formats. Formats appended here must
+# go at the END: changing the order would pick a different file for books that
+# have more than one, which changes their content hash and forces a re-ingest
+# of the whole library.
+FORMAT_PRIORITY = ["EPUB", "PDF", "TXT", "MOBI", "AZW3", "AZW"]
+
+
+class CalibreError(Exception):
+    """Base class for errors raised while reading a Calibre library."""
+
+
+class CalibreLibraryError(CalibreError):
+    """``metadata.db`` is missing, unreadable, corrupt or locked."""
+
+
+class BookFileNotFoundError(CalibreError):
+    """A book has formats in the catalog but no readable file on disk."""
+
 
 class CalibreBridge:
-    """Reads Calibre's metadata.db and extracts book content."""
+    """Reads Calibre's metadata.db and extracts book content.
 
-    def __init__(self, library_path: str | Path):
-        self.library_path = Path(library_path)
+    The database is opened read-only with a busy timeout, so an ingest never
+    waits on Calibre longer than ``timeout`` seconds and never writes to it.
+    """
+
+    def __init__(self, library_path: str | Path, timeout: float = 30.0):
+        self.library_path = Path(library_path).expanduser()
         self.db_path = self.library_path / "metadata.db"
+        self.timeout = timeout
 
         if not self.db_path.exists():
-            raise FileNotFoundError(f"Calibre metadata.db not found at {self.db_path}")
+            raise CalibreLibraryError(f"Calibre metadata.db not found at {self.db_path}")
 
         # Build a lookup: book_id -> actual filesystem path (discovered from disk)
         self._book_path_cache: dict[int, Path] | None = None
+
+    def _connect(self) -> sqlite3.Connection:
+        # as_uri() needs an absolute path; absolute() (unlike resolve()) keeps symlinks.
+        db_uri = self.db_path.absolute().as_uri()
+        try:
+            # Read-only: a reader must not be able to create, upgrade or journal the file.
+            conn = sqlite3.connect(f"{db_uri}?mode=ro", uri=True, timeout=self.timeout)
+        except sqlite3.OperationalError:
+            # A write-ahead-log database that no process has open cannot be
+            # opened read-only (SQLite needs to create the -shm file). Fall
+            # back to a normal connection; this module only ever runs SELECTs.
+            conn = sqlite3.connect(str(self.db_path), timeout=self.timeout)
+        conn.row_factory = sqlite3.Row
+        return conn
 
     def _build_path_cache(self) -> dict[int, Path]:
         """Scan the library directory to discover book files by ID.
@@ -34,8 +71,6 @@ class CalibreBridge:
         We extract the ID from the directory name pattern '(123)'.
         """
         cache: dict[int, Path] = {}
-        import re
-
         id_pattern = re.compile(r"\((\d+)\)\s*$")
 
         for item in self.library_path.rglob("*"):
@@ -55,37 +90,50 @@ class CalibreBridge:
         return self._book_path_cache.get(book_id)
 
     def get_books(self) -> list[dict]:
-        """Read all books from Calibre metadata.db."""
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
+        """Read all books from Calibre metadata.db.
 
-        cursor = conn.execute("""
-            SELECT
-                b.id,
-                b.title,
-                b.sort AS sort_title,
-                b.pubdate,
-                b.last_modified,
-                b.uuid,
-                GROUP_CONCAT(DISTINCT a.name) AS authors,
-                GROUP_CONCAT(DISTINCT t.name) AS tags,
-                GROUP_CONCAT(DISTINCT d.format) AS formats,
-                GROUP_CONCAT(DISTINCT d.name) AS data_names,
-                c.text AS comment
-            FROM books b
-            LEFT JOIN books_authors_link bal ON b.id = bal.book
-            LEFT JOIN authors a ON bal.author = a.id
-            LEFT JOIN books_tags_link btl ON b.id = btl.book
-            LEFT JOIN tags t ON btl.tag = t.id
-            LEFT JOIN data d ON b.id = d.book
-            LEFT JOIN comments c ON b.id = c.book
-            GROUP BY b.id
-            ORDER BY b.title
-        """)
-
-        books = [dict(row) for row in cursor.fetchall()]
-        conn.close()
-        return books
+        Raises:
+            CalibreLibraryError: if the database cannot be read (locked by
+                Calibre, corrupt, or an unexpected schema).
+        """
+        conn = self._connect()
+        try:
+            cursor = conn.execute("""
+                SELECT
+                    b.id,
+                    b.title,
+                    b.sort AS sort_title,
+                    b.pubdate,
+                    b.last_modified,
+                    b.uuid,
+                    GROUP_CONCAT(DISTINCT a.name) AS authors,
+                    GROUP_CONCAT(DISTINCT t.name) AS tags,
+                    GROUP_CONCAT(DISTINCT d.format) AS formats,
+                    GROUP_CONCAT(DISTINCT d.name) AS data_names,
+                    c.text AS comment
+                FROM books b
+                LEFT JOIN books_authors_link bal ON b.id = bal.book
+                LEFT JOIN authors a ON bal.author = a.id
+                LEFT JOIN books_tags_link btl ON b.id = btl.book
+                LEFT JOIN tags t ON btl.tag = t.id
+                LEFT JOIN data d ON b.id = d.book
+                LEFT JOIN comments c ON b.id = c.book
+                GROUP BY b.id
+                ORDER BY b.title
+            """)
+            return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e) or "busy" in str(e):
+                raise CalibreLibraryError(
+                    f"Calibre's metadata.db is locked (is Calibre saving right now?): {self.db_path}"
+                ) from e
+            raise CalibreLibraryError(f"Cannot read Calibre's metadata.db at {self.db_path}: {e}") from e
+        except sqlite3.DatabaseError as e:
+            raise CalibreLibraryError(
+                f"{self.db_path} is not a readable SQLite database ({e}); it may be corrupted"
+            ) from e
+        finally:
+            conn.close()
 
     def get_book_file(self, book: dict, preferred_format: str = "EPUB") -> Path | None:
         """Find the actual file path for a book.
@@ -102,7 +150,7 @@ class CalibreBridge:
 
         # Format priority: preferred first, then standard order
         format_priority = [preferred_format]
-        for fmt in ["EPUB", "PDF", "TXT", "MOBI"]:
+        for fmt in FORMAT_PRIORITY:
             if fmt not in format_priority:
                 format_priority.append(fmt)
 
@@ -113,8 +161,9 @@ class CalibreBridge:
                 if fmt not in available_formats:
                     continue
                 # Look for the file in the book directory
+                suffix = f".{fmt.lower()}"
                 for f in book_dir.iterdir():
-                    if f.is_file() and f.suffix.lower() == f".{fmt.lower()}":
+                    if f.is_file() and f.suffix.lower() == suffix:
                         return f
 
         # Strategy 2: Search for loose files at the top level
@@ -126,32 +175,39 @@ class CalibreBridge:
             # Check top-level files
             ext = f".{fmt.lower()}"
             for f in self.library_path.iterdir():
-                if f.is_file() and f.suffix.lower() == ext:
-                    # Rough match: check if title appears in filename
-                    if title and title.lower().replace(" ", "")[:20] in f.name.lower().replace(" ", ""):
-                        return f
+                # Rough match: check if title appears in filename
+                title_key = title.lower().replace(" ", "")[:20]
+                name_key = f.name.lower().replace(" ", "")
+                if f.is_file() and f.suffix.lower() == ext and title_key and title_key in name_key:
+                    return f
 
         # Strategy 3: Glob search in author directories
-        authors = (book.get("authors") or "Unknown").split(",")[0].strip()
         for fmt in format_priority:
             if fmt not in available_formats:
                 continue
             ext = f".{fmt.lower()}"
-            # Look in author-name directories
+            # Look for the book's directory by ID anywhere in the library
             for f in self.library_path.rglob(f"*{ext}"):
-                # Check if book_id in the parent dir name
                 parent = f.parent.name
                 if f"({book_id})" in parent:
                     return f
 
         return None
 
-    def extract_book(self, book: dict) -> ExtractedDocument | None:
-        """Extract text content from a Calibre book."""
+    def extract_book(self, book: dict) -> ExtractedDocument:
+        """Extract text content from a Calibre book.
+
+        Raises:
+            BookFileNotFoundError: the book has formats in the catalog but no
+                readable file was found on disk.
+            Exception: whatever the extractor raises for a damaged file.
+        """
         file_path = self.get_book_file(book)
         if file_path is None:
-            console.print(f"[yellow]No file found for: {book['title']}[/yellow]")
-            return None
+            formats = book.get("formats") or "none"
+            raise BookFileNotFoundError(
+                f"no file on disk for '{book['title']}' (formats in catalog: {formats})"
+            )
 
         metadata = {
             "title": book.get("title"),
@@ -162,14 +218,10 @@ class CalibreBridge:
             "source": "calibre",
         }
 
-        try:
-            return extract_file(file_path, metadata)
-        except Exception as e:
-            console.print(f"[red]Error extracting {book['title']}: {e}[/red]")
-            return None
+        return extract_file(file_path, metadata)
 
     def list_books(self) -> None:
-        """Pretty-print all books in the library."""
+        """Pretty-print all books in the Calibre library."""
         books = self.get_books()
         table = Table(title=f"Calibre Library ({len(books)} books)")
         table.add_column("ID", style="dim")

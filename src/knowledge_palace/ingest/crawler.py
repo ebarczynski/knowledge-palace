@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 from rich.console import Console
 
-from .extractors import extract_file, ExtractedDocument
+from .extractors import ExtractedDocument, extract_file
 
 console = Console()
 
@@ -28,7 +27,9 @@ class FileCrawler:
         files: list[Path] = []
         for base in self.paths:
             if not base.exists():
-                console.print(f"[yellow]Path not found: {base}[/yellow]")
+                # Do not let a missing root look like "every file was deleted":
+                # the pipeline only prunes documents under roots that exist.
+                console.print(f"[yellow]Path not found: {base} (its indexed documents are left alone)[/yellow]")
                 continue
 
             if base.is_file() and base.suffix.lower() in self.extensions:
@@ -38,8 +39,7 @@ class FileCrawler:
                     files.extend(base.rglob(f"*{ext}"))
 
         # Deduplicate and sort
-        files = sorted(set(files))
-        return files
+        return sorted(set(files))
 
     def extract_file(self, path: Path) -> ExtractedDocument:
         """Extract content from a single file."""

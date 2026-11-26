@@ -78,8 +78,8 @@ class TextExtractor(Extractor):
 
     def _extract_title(self, content: str, path: Path) -> str | None:
         """Extract title from markdown heading or first line."""
-        for line in content.split("\n")[:5]:
-            line = line.strip()
+        for raw_line in content.split("\n")[:5]:
+            line = raw_line.strip()
             if line.startswith("# "):
                 return line[2:].strip()
             if line.startswith("Title:"):
@@ -96,8 +96,8 @@ class EpubExtractor(Extractor):
 
     def extract(self, path: Path, metadata: dict | None = None) -> ExtractedDocument:
         import ebooklib
-        from ebooklib import epub
         from bs4 import BeautifulSoup
+        from ebooklib import epub
 
         book = epub.read_epub(str(path), options={"ignore_ncx": True})
         raw_metadata = metadata or {}
@@ -127,9 +127,7 @@ class EpubExtractor(Extractor):
         content_hash = hashlib.sha256(content.encode()).hexdigest()
 
         # Extract other metadata
-        tags = []
-        for subject in book.get_metadata("DC", "subject"):
-            tags.append(subject[0])
+        tags = [subject[0] for subject in book.get_metadata("DC", "subject")]
 
         return ExtractedDocument(
             title=title or path.stem,
