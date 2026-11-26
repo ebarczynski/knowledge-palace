@@ -6,6 +6,11 @@ retrieval — chunking, the embedding model, task prefixes, `min_similarity`,
 hybrid weights, fusion, or the extraction pipeline — and re-baseline when the
 change is intentional.
 
+This eval and the `tests/` suite divide the work: the tests prove mechanics
+(chunk boundaries, fusion arithmetic, schema shape, sync behaviour, API
+contracts) against a scratch database; this eval measures whether retrieval is
+actually *good* against the live library, which the tests cannot assert.
+
 ## Domains covered
 
 | File | Domain | Cases |
