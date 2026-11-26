@@ -28,6 +28,9 @@ else
 fi
 brew list --formula 2>/dev/null | grep -q "^pgvector$" || brew install pgvector
 
+# Homebrew's postgresql@17 is keg-only: its bin is not on PATH by default.
+export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"
+
 # 3. Start the service (and keep it running across reboots)
 if ! pg_isready -q 2>/dev/null; then
     echo "🔧 Starting postgresql@17 service..."
@@ -35,9 +38,6 @@ if ! pg_isready -q 2>/dev/null; then
     sleep 3
 fi
 pg_isready && echo "✓ PostgreSQL is accepting connections"
-
-# Homebrew's postgresql@17 is keg-only: its bin is not on PATH by default.
-export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"
 
 # 4. Create the kp role (idempotent)
 if psql postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='kp'" | grep -q 1; then
@@ -58,6 +58,23 @@ fi
 # 6. Enable pgvector (idempotent)
 psql -d knowledge_palace -tAc "SELECT 1 FROM pg_extension WHERE extname='vector'" | grep -q 1 \
     || psql -d knowledge_palace -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+# A registered extension is not proof that the library loads. A pgvector
+# upgrade that no longer ships a build for this PostgreSQL major leaves the
+# catalog row in place while every query against the chunks table fails with
+# 'could not access file "$libdir/vector"'. Exercise the type instead.
+if ! psql -d knowledge_palace -tAc "SELECT '[1,2,3]'::vector <=> '[3,2,1]'::vector" > /dev/null; then
+    echo "❌ pgvector is registered but its library cannot be loaded by this PostgreSQL."
+    echo "   Rebuild pgvector for the running major version (no sudo needed under"
+    echo "   Homebrew). PG_SYSROOT is required because Homebrew's pg_config points"
+    echo "   at a CommandLineTools SDK that may not exist on this machine:"
+    echo "     git clone --branch v0.8.2 https://github.com/pgvector/pgvector && cd pgvector"
+    echo '     make PG_CONFIG=/opt/homebrew/opt/postgresql@17/bin/pg_config PG_SYSROOT="$(xcrun --show-sdk-path)"'
+    echo '     make install PG_CONFIG=/opt/homebrew/opt/postgresql@17/bin/pg_config PG_SYSROOT="$(xcrun --show-sdk-path)"'
+    echo "   (Use the version the database has registered: SELECT extversion FROM pg_extension WHERE extname='vector'.)"
+    echo "   Then run this script again."
+    exit 1
+fi
 echo "✓ pgvector extension ready"
 
 echo ""
