@@ -1,16 +1,28 @@
-"""Strawberry GraphQL schema."""
+"""Strawberry GraphQL schema.
+
+Mirrors the REST API: the same ``SearchEngine`` validates every argument, so
+an invalid one surfaces as a GraphQL error with a plain message.
+"""
 
 from __future__ import annotations
 
-from typing import Optional
-
 import enum
+from typing import cast
 
 import strawberry
 from strawberry.scalars import JSON
 from strawberry.types import Info
 
-from ..search.engine import SearchEngine, SearchResult
+from ..db import Document, session_context
+from ..search.engine import SearchEngine, SearchResult, check_limit, check_optional_text, check_source
+
+#: Largest page the ``documents`` field returns.
+MAX_DOCUMENTS = 200
+
+
+def _clean_tags(tags) -> list[str]:
+    """Drop non-string entries (Calibre exports can contain JSON nulls in tags)."""
+    return [t for t in (tags or []) if isinstance(t, str)]
 
 
 @strawberry.type
@@ -20,11 +32,11 @@ class ChunkType:
     content: str
     score: float
     title: str
-    author: Optional[str]
+    author: str | None
     source: str
     tags: list[str]
     highlights: list[str]
-    provenance: Optional[JSON] = None
+    provenance: JSON | None = None
 
     @classmethod
     def from_search_result(cls, r: SearchResult) -> ChunkType:
@@ -38,7 +50,7 @@ class ChunkType:
             source=r.source,
             tags=r.tags,
             highlights=r.highlights,
-            provenance=r.provenance,
+            provenance=cast("JSON | None", r.provenance),
         )
 
 
@@ -54,19 +66,20 @@ class SearchResultType:
 class DocumentType:
     id: strawberry.ID
     title: str
-    author: Optional[str]
+    author: str | None
     source: str
     tags: list[str]
 
 
-class SearchMode(str, enum.Enum):
+@strawberry.enum
+class SearchMode(enum.Enum):
     SEMANTIC = "semantic"
     KEYWORD = "keyword"
     HYBRID = "hybrid"
 
 
-def _get_engine(info: Info) -> SearchEngine:
-    """Extract SearchEngine from FastAPI app state."""
+def _get_engine() -> SearchEngine:
+    """The SearchEngine shared with the REST API (stored on the app module)."""
     from .app import get_search_engine
     return get_search_engine()
 
@@ -76,15 +89,14 @@ class Query:
     @strawberry.field
     async def search(
         self,
-        info: Info,
+        _info: Info,
         query: str,
-        mode: Optional[SearchMode] = None,
-        limit: Optional[int] = None,
-        source: Optional[str] = None,
-        author: Optional[str] = None,
+        mode: SearchMode | None = None,
+        limit: int | None = None,
+        source: str | None = None,
+        author: str | None = None,
     ) -> SearchResultType:
-        engine = _get_engine(info)
-        results = await engine.search(
+        results = await _get_engine().search(
             query,
             mode=mode.value if mode else None,
             limit=limit,
@@ -101,33 +113,31 @@ class Query:
     @strawberry.field
     async def similar(
         self,
-        info: Info,
+        _info: Info,
         text: str,
-        threshold: Optional[float] = 0.7,
-        limit: Optional[int] = 5,
+        threshold: float | None = 0.7,
+        limit: int | None = 5,
     ) -> SearchResultType:
-        engine = _get_engine(info)
-        results = await engine.find_similar(text, threshold=threshold, limit=limit)
+        results = await _get_engine().find_similar(text, threshold=threshold, limit=limit)
         return SearchResultType(
             total=results.total,
-            mode="similar",
-            query=text,
+            mode=results.mode,
+            query=results.query,
             chunks=[ChunkType.from_search_result(r) for r in results.results],
         )
 
     @strawberry.field
     async def context(
         self,
-        info: Info,
+        _info: Info,
         query: str,
-        limit: Optional[int] = 10,
-        max_variants: Optional[int] = 6,
-        source: Optional[str] = None,
-        author: Optional[str] = None,
+        limit: int | None = 10,
+        max_variants: int | None = 6,
+        source: str | None = None,
+        author: str | None = None,
     ) -> SearchResultType:
         """Multi-query retrieval: expand variants, fuse across modes via RRF."""
-        engine = _get_engine(info)
-        results = await engine.retrieve_context(
+        results = await _get_engine().retrieve_context(
             query,
             limit=limit,
             max_variants=max_variants,
@@ -144,30 +154,32 @@ class Query:
     @strawberry.field
     async def documents(
         self,
-        info: Info,
-        source: Optional[str] = None,
-        author: Optional[str] = None,
-        limit: Optional[int] = None,
+        _info: Info,
+        source: str | None = None,
+        author: str | None = None,
+        limit: int | None = None,
     ) -> list[DocumentType]:
+        """Documents, newest first; ``author`` is a case-insensitive substring, as elsewhere."""
         from sqlalchemy import select
-        from ..db import Document, session_context
+
+        source = check_source(source)
+        author = check_optional_text(author, "author")
+        page = check_limit(limit, maximum=MAX_DOCUMENTS) if limit is not None else 50
 
         async with session_context() as session:
-            stmt = select(Document)
+            stmt = select(Document).order_by(Document.created_at.desc(), Document.id)
             if source:
                 stmt = stmt.where(Document.source == source)
             if author:
                 stmt = stmt.where(Document.author.ilike(f"%{author}%"))
-            stmt = stmt.order_by(Document.title).limit(limit or 50)
-            result = await session.execute(stmt)
-            docs = result.scalars().all()
+            docs = (await session.execute(stmt.limit(page))).scalars().all()
             return [
                 DocumentType(
                     id=doc.id,
                     title=doc.title,
                     author=doc.author,
                     source=doc.source,
-                    tags=doc.tags or [],
+                    tags=_clean_tags(doc.tags),
                 )
                 for doc in docs
             ]
