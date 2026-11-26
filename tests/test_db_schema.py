@@ -19,7 +19,12 @@ CANONICAL_INDEXES = [
     "ix_chunks_document_id",
     "ix_chunks_embedding_hnsw",
 ]
-MIGRATIONS = ["001_initial.sql", "002_tsvector_column.sql", "003_drop_redundant_indexes.sql"]
+MIGRATIONS = [
+    "001_initial.sql",
+    "002_tsvector_column.sql",
+    "003_drop_redundant_indexes.sql",
+    "004_timestamp_columns.sql",
+]
 
 # What SQLAlchemy's create_all() produced before the fix: no tsvector column, a
 # differently named HNSW index, and timestamps without a time zone.
@@ -126,6 +131,7 @@ async def test_a_database_created_by_the_old_create_all_converges_and_keeps_its_
     got = await state()
     assert got["indexes"] == CANONICAL_INDEXES
     assert got["tsvector"] == 1
+    assert got["created_at"] == "timestamp with time zone", "migration 004 converts the old TIMESTAMP columns"
     async with session_context() as session:
         kept = (await session.execute(text("SELECT count(*) FROM chunks"))).scalar()
         filled = (await session.execute(text(

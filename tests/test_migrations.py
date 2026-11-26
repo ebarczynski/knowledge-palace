@@ -16,6 +16,7 @@ def test_migrations_dir_points_at_the_sql_files():
         "001_initial.sql",
         "002_tsvector_column.sql",
         "003_drop_redundant_indexes.sql",
+        "004_timestamp_columns.sql",
     ]
 
 
@@ -53,7 +54,12 @@ def test_split_preserves_statement_text_verbatim():
 
 def test_each_shipped_migration_splits_into_the_expected_statements():
     counts = {path.name: len(split_sql_statements(path.read_text())) for path in migration_files()}
-    assert counts == {"001_initial.sql": 13, "002_tsvector_column.sql": 2, "003_drop_redundant_indexes.sql": 2}
+    assert counts == {
+        "001_initial.sql": 13,
+        "002_tsvector_column.sql": 2,
+        "003_drop_redundant_indexes.sql": 2,
+        "004_timestamp_columns.sql": 2,
+    }
 
 
 def test_shipped_migrations_are_idempotent():
