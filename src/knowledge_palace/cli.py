@@ -274,7 +274,7 @@ def serve(ctx, host: str | None, port: int | None):
 @cli.command()
 @click.pass_context
 def mcp(ctx):
-    """Start the MCP server for Hermes agent integration."""
+    """Start the MCP server (stdio) for agent integration."""
     from .mcp_server.server import run_mcp_server
 
     config = ctx.obj["config"]
