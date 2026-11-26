@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-import concurrent.futures
-import functools
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 import tiktoken
@@ -18,12 +20,37 @@ EMOJI = "🎉🚀✨ party time with flags 🇯🇵🇺🇸 and families 👨‍
 ASCII = ENC.decode(ENC.encode("The quick brown fox jumps over the lazy dog. ") * 600)
 
 
-def _chunk_in_subprocess(text: str, max_tokens: int, overlap_tokens: int, timeout: float = 10.0):
-    """Run chunk_fixed elsewhere so a chunker that never returns fails the test instead of hanging it."""
-    function = functools.partial(chunk_fixed, text, max_tokens=max_tokens, overlap_tokens=overlap_tokens)
-    with concurrent.futures.ProcessPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(function)
-        return future.result(timeout=timeout)
+def _chunk_in_subprocess(text: str, max_tokens: int, overlap_tokens: int, timeout: float = 10.0) -> tuple[str, str]:
+    """Run chunk_fixed in a throwaway interpreter; return ("ok"|"error"|"hung", detail).
+
+    subprocess.run() kills the child on timeout, so a chunker stuck in an
+    infinite loop surfaces as ("hung", ...) instead of deadlocking the suite
+    (a ProcessPoolExecutor would join the looping worker forever).
+    """
+    code = (
+        "import sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from knowledge_palace.ingest.chunker import chunk_fixed\n"
+        "cs = chunk_fixed(sys.argv[2], max_tokens=int(sys.argv[3]), overlap_tokens=int(sys.argv[4]))\n"
+        "print('N', len(cs))\n"
+    )
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [sys.executable, "-I", "-c", code, str(_SRC_ROOT), text, str(max_tokens), str(overlap_tokens)],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return "hung", ""
+    if proc.returncode != 0:
+        lines = proc.stderr.strip().splitlines()
+        return "error", lines[-1] if lines else ""
+    return "ok", proc.stdout.strip()
+
+
+# The isolated child ignores PYTHONPATH, so the tree under test is passed explicitly;
+# KP_TEST_SRC_ROOT lets a run point the child at a different checkout (fail-before runs).
+_SRC_ROOT = os.environ.get("KP_TEST_SRC_ROOT") or \
+    str(Path(__file__).resolve().parent.parent / "src")
 
 
 @pytest.mark.parametrize(
@@ -33,13 +60,15 @@ def _chunk_in_subprocess(text: str, max_tokens: int, overlap_tokens: int, timeou
 def test_degenerate_windows_are_rejected_instead_of_hanging(max_tokens: int, overlap_tokens: int):
     # At the audited revision the first five of these never returned (the loop
     # step was <= 0) and the last silently skipped text between chunks.
-    with pytest.raises(ValueError, match="overlap_tokens|max_tokens"):
-        _chunk_in_subprocess(ASCII, max_tokens, overlap_tokens)
+    outcome, detail = _chunk_in_subprocess(ASCII, max_tokens, overlap_tokens)
+    assert outcome == "error", f"chunk_fixed({max_tokens}, {overlap_tokens}) {outcome}: {detail}"
+    assert "overlap_tokens|max_tokens" in detail or "overlap_tokens must" in detail or "max_tokens must" in detail
 
 
 def test_valid_window_still_works_in_a_subprocess():
-    chunks = _chunk_in_subprocess(ASCII, 512, 50)
-    assert len(chunks) > 5
+    outcome, detail = _chunk_in_subprocess(ASCII, 512, 50)
+    assert outcome == "ok", detail
+    assert int(detail.split()[1]) > 5
 
 
 def test_guard_also_covers_the_semantic_strategy():
