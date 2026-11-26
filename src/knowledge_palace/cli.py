@@ -7,18 +7,18 @@ import os
 from pathlib import Path
 
 import click
+import toml
 from rich.console import Console
 from rich.progress import (
+    BarColumn,
     Progress,
     SpinnerColumn,
-    TextColumn,
-    BarColumn,
     TaskProgressColumn,
+    TextColumn,
     TimeRemainingColumn,
 )
-from rich.table import Table
 
-from .config import Config
+from .config import Config, ConfigError, DatabaseConfig
 
 console = Console()
 # MCP uses stdio for JSON-RPC, so anything meant for humans on that transport
@@ -39,15 +39,29 @@ def load_config(config_path: str | None) -> Config:
 def cli(ctx, config):
     """Knowledge Palace - Personal Knowledge Base with Semantic Search."""
     ctx.ensure_object(dict)
-    ctx.obj["config"] = load_config(config)
+    try:
+        ctx.obj["config"] = load_config(config)
+    except ConfigError as e:
+        # A bad value in config.toml is a user problem: show it, not a traceback.
+        raise click.ClickException(f"invalid config: {e}") from e
+    except OSError as e:
+        raise click.ClickException(f"cannot read config: {e}") from e
+    except toml.TomlDecodeError as e:
+        raise click.ClickException(f"invalid TOML in config: {e}") from e
 
 
 @cli.command()
 @click.option("--source", "-s", type=click.Choice(["calibre", "files", "all"]), default="all")
-@click.option("--reindex", is_flag=True, help="Reprocess already-indexed documents")
+@click.option("--reindex", is_flag=True,
+              help="Rebuild documents that are already indexed (after changing chunking "
+                   "or embedding settings), not just new or changed ones")
 @click.pass_context
 def ingest(ctx, source: str, reindex: bool):
-    """Ingest documents from Calibre and/or file directories."""
+    """Ingest documents from Calibre and/or file directories.
+
+    Reconciles the index with the sources: new and changed documents are
+    indexed, documents whose file or Calibre book is gone are removed.
+    """
     from .ingest.pipeline import IngestionPipeline
 
     config = ctx.obj["config"]
@@ -57,11 +71,27 @@ def ingest(ctx, source: str, reindex: bool):
 
     results = asyncio.run(pipeline.run(source=source, reindex=reindex))
 
-    console.print(f"\n[bold]Results:[/bold]")
+    console.print("\n[bold]Results:[/bold]")
     console.print(f"  Documents processed: [green]{results['extracted']}[/green]")
     console.print(f"  Chunks created: [green]{results['chunked']}[/green]")
     console.print(f"  Chunks embedded: [green]{results['embedded']}[/green]")
-    console.print(f"  Errors: [red]{results['errors']}[/red]")
+    console.print(f"  Unchanged or duplicate: [green]{results['skipped']}[/green]")
+    tone = "red" if results["errors"] else "green"
+    console.print(f"  Errors: [{tone}]{results['errors']}[/{tone}]")
+    if results["errors"]:
+        ctx.exit(1)
+
+
+def pg_dump_argv(database: DatabaseConfig, backup_path: str) -> list[str]:
+    """``pg_dump`` command for the pre-reindex backup.
+
+    The port is part of it: without it the backup would silently target
+    whatever listens on 5432, which may not be the database being re-embedded.
+    """
+    return [
+        "pg_dump", "-h", database.host, "-p", str(database.port), "-U", database.user,
+        "-Fc", "-d", database.name, "-f", backup_path,
+    ]
 
 
 @cli.command("reindex-embeddings")
@@ -81,6 +111,7 @@ def reindex_embeddings(ctx, skip_backup: bool, start_after: int, provider: str, 
     a pg_dump backup of the database first unless --skip-backup is given.
     """
     import subprocess
+    import tempfile
     import time as _time
 
     from sqlalchemy import text as sql_text
@@ -94,21 +125,22 @@ def reindex_embeddings(ctx, skip_backup: bool, start_after: int, provider: str, 
     async def run():
         await init_db(config.database.url)
 
-        # 1. Backup (safety: old embeddings are overwritten in place)
+        # 1. Backup (safety: old embeddings are overwritten in place). A private
+        #    directory, not a predictable name in a shared /tmp.
         if not skip_backup:
-            backup_path = "/tmp/knowledge_palace_pre_reindex.dump"
+            backup_path = str(Path(tempfile.mkdtemp(prefix="knowledge_palace_pre_reindex_")) / "dump")
             console.print(f"[dim]Backing up database to {backup_path}...[/dim]")
-            r = subprocess.run(
-                ["pg_dump", "-h", config.database.host, "-U", config.database.user,
-                 "-Fc", "-d", config.database.name, "-f", backup_path],
+            # argv only, never a shell; the process runs before any async work starts.
+            r = subprocess.run(  # noqa: ASYNC221, S603
+                pg_dump_argv(config.database, backup_path),
                 env={"PGPASSWORD": config.database.password, "PATH": os.environ["PATH"]},
-                capture_output=True, text=True,
+                capture_output=True, text=True, check=False,
             )
             if r.returncode != 0:
                 console.print(f"[red]Backup failed: {r.stderr.strip()}[/red]")
                 await close_db()
                 return
-            console.print(f"[green]✓ backup written[/green]")
+            console.print("[green]✓ backup written[/green]")
 
         # 2. Stream (id, content) in batches and re-embed.
         #    Writes are batched: one UPDATE ... FROM (VALUES ...) statement +
@@ -144,7 +176,8 @@ def reindex_embeddings(ctx, skip_backup: bool, start_after: int, provider: str, 
 
                 updates = [
                     {"id": str(cid), "e": str(emb)}
-                    for cid, emb in zip(ids, embs) if emb is not None
+                    for cid, emb in zip(ids, embs, strict=True)
+                    if emb is not None
                 ]
                 errors += len(rows) - len(updates)
                 if updates:
@@ -176,24 +209,28 @@ def reindex_embeddings(ctx, skip_backup: bool, start_after: int, provider: str, 
 @cli.command()
 @click.argument("query")
 @click.option("--mode", "-m", type=click.Choice(["semantic", "keyword", "hybrid"]), default="hybrid")
-@click.option("--limit", "-n", default=10)
+@click.option("--limit", "-n", default=10, type=click.IntRange(1, 100), show_default=True)
 @click.option("--source", "-s", type=click.Choice(["calibre", "file"]), default=None)
 @click.pass_context
 def search(ctx, query: str, mode: str, limit: int, source: str | None):
     """Search the knowledge base."""
-    from .db import init_db, close_db
-    from .search.engine import SearchEngine
+    from .db import close_db, init_db
+    from .search.engine import InvalidQueryError, SearchEngine
 
     config = ctx.obj["config"]
 
     async def _search():
         await init_db(config.database.url)
-        engine = SearchEngine(config)
-        results = await engine.search(query, mode=mode, limit=limit, source_filter=source)
-        await close_db()
-        return results
+        try:
+            engine = SearchEngine(config)
+            return await engine.search(query, mode=mode, limit=limit, source_filter=source)
+        finally:
+            await close_db()
 
-    results = asyncio.run(_search())
+    try:
+        results = asyncio.run(_search())
+    except InvalidQueryError as e:
+        raise click.ClickException(str(e)) from e
 
     console.print(f"\n[bold cyan]Search: '{query}' ({mode}) — {results.total} results[/bold cyan]\n")
 
@@ -214,6 +251,7 @@ def search(ctx, query: str, mode: str, limit: int, source: str | None):
 def serve(ctx, host: str | None, port: int | None):
     """Start the API server (REST + GraphQL)."""
     import uvicorn
+
     from .api.app import create_app
 
     config = ctx.obj["config"]
@@ -222,7 +260,7 @@ def serve(ctx, host: str | None, port: int | None):
 
     app = create_app(config)
 
-    console.print(f"\n[bold cyan]🏛️  Knowledge Palace API[/bold cyan]")
+    console.print("\n[bold cyan]🏛️  Knowledge Palace API[/bold cyan]")
     console.print(f"  REST:    http://{host}:{port}/api/v1/")
     console.print(f"  GraphQL: http://{host}:{port}/graphql")
     console.print(f"  Docs:    http://{host}:{port}/docs\n")
@@ -249,7 +287,7 @@ def mcp(ctx):
 @click.pass_context
 def calibre_list(ctx):
     """List books in the Calibre library."""
-    from .ingest.calibre import CalibreBridge
+    from .ingest.calibre import CalibreBridge, CalibreLibraryError
 
     config = ctx.obj["config"]
     if not config.calibre.library_path:
@@ -257,10 +295,13 @@ def calibre_list(ctx):
         return
 
     bridge = CalibreBridge(config.calibre.library_path)
-    bridge.list_books()
+    try:
+        bridge.list_books()
+    except CalibreLibraryError as e:
+        raise click.ClickException(str(e)) from e
 
 
-@cli.command("eval", context_settings={"ignore_unknown_options": True})
+@cli.command("eval")
 @click.option("--api", default=None, help="API base URL (default: from config.toml)")
 @click.option("--cases-dir", type=click.Path(exists=True, file_okay=False), default=None,
               help="Directory with *.jsonl eval cases (default: evals/cases)")
@@ -304,8 +345,19 @@ def eval_cmd(ctx, api, cases_dir, domains, modes, k, gate, baseline, save_baseli
 
 @cli.command("init-config")
 @click.argument("path", default="config.toml")
-def init_config(path: str):
-    """Create a sample configuration file."""
+@click.option("--force", is_flag=True, help="Overwrite the file if it already exists")
+def init_config(path: str, force: bool):
+    """Create a sample configuration file.
+
+    Refuses to overwrite an existing file unless --force is given: a config
+    holds library paths and settings that are not recoverable from the sample.
+    """
+    target = Path(path)
+    if target.exists() and not force:
+        raise click.ClickException(
+            f"{path} already exists; pass --force to overwrite it (its current "
+            "library paths and settings would be lost)"
+        )
     sample = """# Knowledge Palace Configuration
 
 [database]
@@ -328,9 +380,9 @@ file_extensions = [".md", ".txt", ".org", ".rst"]
 
 [embedding]
 model = "nomic-ai/nomic-embed-text-v1.5"
-# Backend is auto-selected: ONNX Runtime (fastest for nomic on Apple Silicon),
-# then PyTorch. MLX is used automatically if the model architecture is
-# supported by mlx-embeddings (nomic_bert is not).
+# Backend is auto-selected: ONNX Runtime (on the CPU), then PyTorch. MLX is
+# used automatically only if mlx-embeddings is installed and supports the
+# model's architecture (nomic_bert is not supported).
 provider = "auto"
 batch_size = 32
 dimensions = 768
@@ -339,6 +391,7 @@ device = "cpu"
 [chunking]
 strategy = "semantic"
 max_tokens = 512
+# Must be smaller than max_tokens: 0 <= overlap_tokens < max_tokens
 overlap_tokens = 50
 respect_headings = true
 
@@ -348,14 +401,19 @@ hybrid_weight_vector = 0.7
 hybrid_weight_fts = 0.3
 default_limit = 10
 # Vector-match quality floor (cosine). Calibrated for nomic-embed-text-v1.5
-# with task prefixes; re-calibrate if you change the embedding model.
+# with task prefixes; re-calibrate (kp eval) if you change the embedding model.
+# 0 disables the floor.
 min_similarity = 0.72
 
 [api]
-host = "0.0.0.0"
+# 127.0.0.1 = local-only. The API has no authentication: use "0.0.0.0" only
+# behind a firewall or reverse proxy.
+host = "127.0.0.1"
 port = 8080
+# Web origins allowed to call the API from a browser. Empty = none.
+cors_origins = []
 """
-    Path(path).write_text(sample)
+    target.write_text(sample)
     console.print(f"[green]Config written to {path}[/green]")
 
 
