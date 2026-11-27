@@ -26,6 +26,7 @@ import json
 import sys
 import time
 import tomllib
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -80,13 +81,13 @@ def load_cases(cases_dir: Path) -> list[Case]:
     cases: list[Case] = []
     for path in sorted(cases_dir.glob("*.jsonl")):
         for lineno, line in enumerate(path.read_text().splitlines(), 1):
-            line = line.strip()
-            if not line or line.startswith("#"):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
                 continue
             try:
-                raw = json.loads(line)
+                raw = json.loads(stripped)
             except json.JSONDecodeError as e:
-                raise SystemExit(f"{path}:{lineno}: invalid JSON: {e}")
+                raise SystemExit(f"{path}:{lineno}: invalid JSON: {e}") from None
             cases.append(
                 Case(
                     id=raw["id"],
@@ -162,14 +163,13 @@ def run_case(client: httpx.Client, api: str, case: Case, mode: str, k: int) -> C
 def evaluate(api: str, cases: list[Case], modes: list[str], k: int, concurrency: int) -> Report:
     report = Report(api=api, k=k, cases=len(cases))
     jobs = [(case, mode) for case in cases for mode in modes]
-    with httpx.Client(timeout=httpx.Timeout(300.0)) as client:
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = [pool.submit(run_case, client, api, case, mode, k) for case, mode in jobs]
-            for fut in futures:
-                res = fut.result()
-                report.results.append(res)
-                if res.case.negative and res.top_score is not None:
-                    report.negative_scores.setdefault(res.mode, []).append(res.top_score)
+    with httpx.Client(timeout=httpx.Timeout(300.0)) as client, ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = [pool.submit(run_case, client, api, case, mode, k) for case, mode in jobs]
+        for fut in futures:
+            res = fut.result()
+            report.results.append(res)
+            if res.case.negative and res.top_score is not None:
+                report.negative_scores.setdefault(res.mode, []).append(res.top_score)
     report.results.sort(key=lambda r: (r.case.domain, r.case.id, MODES.index(r.mode)))
     return report
 
@@ -178,28 +178,46 @@ def _agg(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def _reciprocal_rank(r: CaseResult, k: int) -> float:
+    """1 / rank of the first relevant hit when it is within the top k, else 0."""
+    rank = r.first_relevant_rank
+    return 1.0 / rank if rank is not None and rank <= k else 0.0
+
+
+def _ranked_within(r: CaseResult, k: int) -> bool:
+    """True when the first relevant hit is within the top k."""
+    return r.first_relevant_rank is not None and r.first_relevant_rank <= k
+
+
 def compute_metrics(report: Report) -> dict:
     """Nest: metric -> mode -> domain -> value (plus overall)."""
     k = report.k
     domains = sorted({r.case.domain for r in report.results if not r.case.negative})
     negatives = [r for r in report.results if r.case.negative]
-    metrics: dict = {"hit@k": {}, "mrr@k": {}, "recall@k": {}, "latency_p50_ms": {}, "negative_fp": {}, "negative_top_score_max": {}}
+    metrics: dict = {
+        "hit@k": {}, "mrr@k": {}, "recall@k": {}, "latency_p50_ms": {}, "negative_fp": {}, "negative_top_score_max": {},
+    }
 
     for mode in MODES:
         rows = [r for r in report.results if r.mode == mode]
         pos = [r for r in rows if not r.case.negative]
-        metrics["hit@k"][mode] = {
-            **{d: _agg([1.0 if r.first_relevant_rank and r.first_relevant_rank <= k else 0.0 for r in pos if r.case.domain == d]) for d in domains},
-            "overall": _agg([1.0 if r.first_relevant_rank and r.first_relevant_rank <= k else 0.0 for r in pos]),
-        }
-        metrics["mrr@k"][mode] = {
-            **{d: _agg([1.0 / r.first_relevant_rank if r.first_relevant_rank and r.first_relevant_rank <= k else 0.0 for r in pos if r.case.domain == d]) for d in domains},
-            "overall": _agg([1.0 / r.first_relevant_rank if r.first_relevant_rank and r.first_relevant_rank <= k else 0.0 for r in pos]),
-        }
-        metrics["recall@k"][mode] = {
-            **{d: _agg([r.fragments_matched_topk / r.fragments_matched_any if r.fragments_matched_any else 0.0 for r in pos if r.case.domain == d]) for d in domains},
-            "overall": _agg([r.fragments_matched_topk / r.fragments_matched_any if r.fragments_matched_any else 0.0 for r in pos]),
-        }
+        def hit(rs: list[CaseResult]) -> float:
+            return _agg([1.0 if _ranked_within(r, k) else 0.0 for r in rs])
+
+        def reciprocal(rs: list[CaseResult]) -> float:
+            return _agg([_reciprocal_rank(r, k) for r in rs])
+
+        def recall(rs: list[CaseResult]) -> float:
+            return _agg([
+                r.fragments_matched_topk / r.fragments_matched_any if r.fragments_matched_any else 0.0 for r in rs
+            ])
+
+        def per_domain(metric: Callable[[list[CaseResult]], float], rows: list[CaseResult]) -> dict[str, float]:
+            return {d: metric([r for r in rows if r.case.domain == d]) for d in domains}
+
+        metrics["hit@k"][mode] = {**per_domain(hit, pos), "overall": hit(pos)}
+        metrics["mrr@k"][mode] = {**per_domain(reciprocal, pos), "overall": reciprocal(pos)}
+        metrics["recall@k"][mode] = {**per_domain(recall, pos), "overall": recall(pos)}
         lat = sorted(r.latency_ms for r in rows)
         metrics["latency_p50_ms"][mode] = {
             "overall": lat[len(lat) // 2] if lat else 0.0,
@@ -250,11 +268,15 @@ def format_report(report: Report, metrics: dict, modes: list[str]) -> str:
 
 def format_misses(report: Report, k: int, modes: list[str]) -> str:
     lines = ["", "Missed cases (no acceptable source in top-k):"]
-    misses = [r for r in report.results if not r.case.negative and (r.first_relevant_rank is None or r.first_relevant_rank > k) and r.mode in modes]
-    if not misses:
-        lines.append("  none")
-    for r in misses:
-        lines.append(f"  [{r.mode:>8}] {r.case.id}: {r.case.query[:70]}")
+    missed = [
+        r for r in report.results
+        if not r.case.negative and (r.first_relevant_rank is None or r.first_relevant_rank > k) and r.mode in modes
+    ]
+    lines.extend(
+        ["  none"]
+        if not missed
+        else [f"  [{r.mode:>8}] {r.case.id}: {r.case.query[:70]}" for r in missed]
+    )
     return "\n".join(lines)
 
 
@@ -269,7 +291,7 @@ def compare_baseline(metrics: dict, baseline: dict, k: int, regression: float) -
     for mode in MODES:
         cur = metrics["hit@k"].get(mode, {})
         old = base_hit.get(mode, {})
-        for scope in (*old.keys(),):
+        for scope in old:
             if scope == "domains" or scope not in cur:
                 continue
             delta = cur[scope] - old[scope]
@@ -286,7 +308,9 @@ def compare_baseline(metrics: dict, baseline: dict, k: int, regression: float) -
     return problems
 
 
-def check_gates(metrics: dict, modes: list[str], k: int, min_overall: float, min_domain: float, max_neg_fp: float) -> list[str]:
+def check_gates(
+    metrics: dict, modes: list[str], k: int, min_overall: float, min_domain: float, max_neg_fp: float,
+) -> list[str]:
     problems: list[str] = []
     if "context" in modes:
         overall = metrics["hit@k"]["context"]["overall"]

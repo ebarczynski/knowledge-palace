@@ -5,6 +5,6 @@ context for an agent harness in a single call.
 """
 
 from .expand import expand_queries
-from .fuse import fuse, RRF_K
+from .fuse import RRF_K, fuse
 
 __all__ = ["expand_queries", "fuse", "RRF_K"]

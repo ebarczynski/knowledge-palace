@@ -1,6 +1,6 @@
 """Pydantic models for REST API."""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class HealthResponse(BaseModel):
@@ -11,7 +11,13 @@ class SearchResultItem(BaseModel):
     chunk_id: str
     document_id: str
     content: str
-    score: float
+    score: float = Field(
+        description=(
+            "Ranking score; its meaning depends on `mode` and is not comparable across "
+            "modes: cosine similarity (semantic, similar), ts_rank_cd (keyword), "
+            "RRF score (hybrid, context)."
+        )
+    )
     title: str
     author: str | None
     source: str

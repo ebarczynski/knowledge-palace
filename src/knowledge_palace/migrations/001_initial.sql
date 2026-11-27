@@ -1,5 +1,9 @@
 -- Knowledge Palace: Initial Schema
 -- Requires: PostgreSQL 16+ with pgvector extension
+--
+-- Every statement is idempotent: the migration runner (migrations/__init__.py)
+-- re-applies this file on databases that were set up by hand before
+-- schema_migrations existed.
 
 -- Enable pgvector
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -70,7 +74,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER documents_updated_at
+CREATE OR REPLACE TRIGGER documents_updated_at
     BEFORE UPDATE ON documents
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at();

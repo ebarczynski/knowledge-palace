@@ -7,11 +7,11 @@
 # Usage:
 #   ./scripts/migrate-to-host.sh <user>@<host> [stage]
 #
-# Stages (run in order; each is idempotent/resumable):
+# Stages (run in order; each one can be re-run):
 #   all       everything below (default)
 #   code      rsync project (excludes .venv/.git/caches)
-#   db        pg_dump -> scp -> parallel pg_restore on target
-#   verify    chunk count + kp search smoke test on target
+#   db        pg_dump -> scp -> parallel pg_restore on target (--clean, so re-runnable)
+#   verify    row counts match the source + kp search smoke test on target
 #   books     rsync the Calibre library (9+ GB, run last / overnight)
 #
 # Prerequisites on the TARGET Mac (one-time):
@@ -62,7 +62,9 @@ stage_db() {
     ok "copied"
 
     log "  restoring on target (parallel)..."
-    ssh "$DEST" "$RPATH PGPASSWORD=kp pg_restore -h localhost -U kp -d knowledge_palace -j 4 --no-owner --no-privileges /tmp/knowledge_palace.dump && rm /tmp/knowledge_palace.dump"
+    # --clean --if-exists drops each object before recreating it, which is what
+    # makes this stage safe to re-run after a partial restore.
+    ssh "$DEST" "$RPATH PGPASSWORD=kp pg_restore -h localhost -U kp -d knowledge_palace -j 4 --clean --if-exists --no-owner --no-privileges /tmp/knowledge_palace.dump && rm /tmp/knowledge_palace.dump"
     ok "restored"
     rm -f "$DUMP_FILE"
 }
@@ -70,11 +72,19 @@ stage_db() {
 stage_verify() {
     log "Stage: verify on $DEST"
 
+    # Expected counts come from the source database. A hardcoded number fails
+    # this check as soon as the library changes.
+    src_chunks=$(PGPASSWORD=kp psql -h localhost -U kp -d knowledge_palace -t -A \
+        -c 'SELECT count(*) FROM chunks') || fail "cannot count chunks on the source database"
+    src_docs=$(PGPASSWORD=kp psql -h localhost -U kp -d knowledge_palace -t -A \
+        -c 'SELECT count(*) FROM documents') || fail "cannot count documents on the source database"
+
     chunks=$(ssh "$DEST" "$RPATH PGPASSWORD=kp psql -h localhost -U kp -d knowledge_palace -t -A -c 'SELECT count(*) FROM chunks'")
-    [ "$chunks" = "134261" ] || fail "chunk count mismatch: got $chunks, expected 134261"
+    [ "$chunks" = "$src_chunks" ] || fail "chunk count mismatch: target has $chunks, source has $src_chunks"
     ok "chunks: $chunks"
 
     docs=$(ssh "$DEST" "$RPATH PGPASSWORD=kp psql -h localhost -U kp -d knowledge_palace -t -A -c 'SELECT count(*) FROM documents'")
+    [ "$docs" = "$src_docs" ] || fail "document count mismatch: target has $docs, source has $src_docs"
     ok "documents: $docs"
 
     log "  installing python env on target (uv sync)..."

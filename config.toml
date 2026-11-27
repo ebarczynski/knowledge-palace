@@ -46,3 +46,7 @@ min_similarity = 0.72
 # other devices on the network to reach the API.
 host = "127.0.0.1"
 port = 8080
+# Browser origins allowed to call the API from a web page. Empty = none: with
+# no origins configured the API sends no CORS headers, so a page open in the
+# same browser cannot read the library.
+cors_origins = []

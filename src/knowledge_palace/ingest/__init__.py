@@ -1,10 +1,10 @@
 """Ingestion subpackage."""
 
-from .pipeline import IngestionPipeline
 from .calibre import CalibreBridge
-from .crawler import FileCrawler
 from .chunker import chunk_text
-from .extractors import extract_file, ExtractedDocument
+from .crawler import FileCrawler
+from .extractors import ExtractedDocument, extract_file
+from .pipeline import IngestionPipeline
 
 __all__ = [
     "IngestionPipeline",

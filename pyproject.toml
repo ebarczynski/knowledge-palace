@@ -56,6 +56,16 @@ dependencies = [
 # MLX-compatible model (bert, modernbert, siglip, qwen3, ...), it will be used.
 # For nomic-embed-text, ONNX Runtime is the fastest available backend.
 
+[dependency-groups]
+# `uv sync` installs these too: tests, lint and type check are part of the project.
+dev = [
+    "pytest>=9.0",
+    "pytest-asyncio>=1.0",
+    "ruff>=0.14",
+    "mypy>=1.18",
+    "types-toml>=0.10",
+]
+
 [project.scripts]
 kp = "knowledge_palace.cli:cli"
 
@@ -65,3 +75,87 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/knowledge_palace"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra --strict-markers"
+markers = [
+    "db: needs PostgreSQL + pgvector; set KP_TEST_DATABASE_URL (tables are truncated)",
+    "embedding: needs the real nomic-embed-text-v1.5 model (cached or downloadable); set KP_TEST_EMBEDDING=1",
+]
+# An unclosed connection, file or socket in the code under test fails the test.
+filterwarnings = [
+    "error::ResourceWarning",
+    # Third-party noise observed on Python 3.14, not actionable from here:
+    # PyMuPDF's SWIG wrapper types, and anyio's pytest plugin importing a
+    # deprecated pytest alias.
+    "ignore:builtin type SwigPyObject has no __module__ attribute:DeprecationWarning",
+    "ignore:builtin type SwigPyPacked has no __module__ attribute:DeprecationWarning",
+    "ignore:builtin type swigvarlink has no __module__ attribute:DeprecationWarning",
+    "ignore:_pytest.python.CallSpec2 has been renamed:pytest.PytestRemovedIn10Warning",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+src = ["src", "tests", "evals"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # comprehensions
+    "UP",   # pyupgrade
+    "SIM",  # simplify
+    "RET",  # return style
+    "PIE",  # misc lints
+    "RSE",  # raise style
+    "PTH",  # use pathlib
+    "ASYNC",# async pitfalls
+    "PERF", # performance
+    "PL",   # pylint (errors, warnings, refactor)
+    "ARG",  # unused arguments
+    "S",    # bandit-style security checks
+    "TC",   # typing-only imports
+    "PGH",  # pygrep hooks
+    "FIX",  # unfinished code markers
+]
+ignore = [
+    "PLR0913",    # search() takes its filters as explicit keyword arguments on purpose
+    "PLR0917",
+    "PLR0912",    # the pipeline's per-document decision tree is clearer in one function
+    "PLR0915",
+    "PLR2004",    # RRF constants and rank positions are clearer inline
+    "FIX002",     # TODO-style notes are allowed in comments
+    "PLC0415",    # heavy dependencies (ML stack, CLI commands) are imported lazily on purpose
+    "PLW0603",    # the engine and app state are module-level singletons by design
+    "B008",       # dataclasses use field(default_factory=...)
+    "TC003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Standalone entry points and test fixtures print and use broad excepts by design.
+"evals/run_eval.py" = ["S101", "INP001"]
+"tests/*" = ["S101", "S608", "PLR2004", "ARG001", "TC001", "TC002", "ASYNC109", "ASYNC240"]
+"src/knowledge_palace/evalharness.py" = ["PLW1514"]
+# Strawberry resolves annotations at import time to build its schema, so these
+# "typing-only" imports must stay real imports.
+"src/knowledge_palace/api/graphql_schema.py" = ["TC001", "TC002"]
+# Classification does one stat() per document; offloading it to a thread would
+# cost more than the call.
+"src/knowledge_palace/ingest/pipeline.py" = ["ASYNC240"]
+
+[tool.mypy]
+python_version = "3.14"
+packages = ["knowledge_palace"]
+mypy_path = "src"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_reexport = false
